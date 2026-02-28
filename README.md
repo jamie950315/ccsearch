@@ -82,3 +82,27 @@ python ccsearch.py "summary of the latest AI news this week" -e perplexity --for
 ### Error Handling
 - If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
+
+## Instructing Your AI to Use `ccsearch` (CLAUDE.md)
+To ensure your AI agents (like Claude Code) automatically use this tool instead of hallucinating or using default, less-capable search tools, we highly recommend adding the following guidelines to your project's or home directory's `CLAUDE.md` (or equivalent system prompt instructions file). 
+
+Copy and paste the snippet below into your `CLAUDE.md`:
+
+```markdown
+### AI Assistant Guidelines & Tools
+
+**Web Search Instructions:**
+- **DO NOT** use any default `Web Search Tool` provided by your environment.
+- **INSTEAD**, you MUST use the custom `ccsearch` utility CLI tool located at `~/ccsearch/ccsearch.py` (which is also globally accessible as `ccsearch`).
+- **PROACTIVE SEARCHING**: You must proactively search the web using `ccsearch` whenever the user asks about something you are unsure of, or whenever the topic involves relatively new technologies, news, or frameworks (released within the last year). Do not guess or hallucinate!
+- **ITERATIVE RESEARCH**: You are encouraged to perform multiple rounds of searches with different keywords or different engines (Brave vs Perplexity) to compile the most accurate and reliable answer.
+- **Why?** It utilizes Brave Data for Search API and OpenRouter Perplexity, providing faster, more robust results with automatic error-handling and retries.
+- **How to Use Examples (always use `--format json` for agents):**
+  1. For finding specific links, documentation, or diverse web sources:
+     `ccsearch "Next.js 14 hydration docs" -e brave --format json`
+  2. For broad questions requiring a synthesized answer from the web:
+     `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json`
+  3. If you didn't find what you need via Brave, you can fetch the next page of results:
+     `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
+- For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
+```
