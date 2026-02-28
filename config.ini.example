@@ -1,0 +1,23 @@
+[Brave]
+# 限制 Brave Search API 的每秒請求數
+requests_per_second = 1
+# 每次搜尋回傳的最大結果筆數
+count = 10
+# 內容過濾: off, moderate, strict
+safesearch = moderate
+# 搜尋時間範圍: 空白為不限, pd (過去24小時), pw (過去一週), pm (過去一個月), py (過去一年)
+freshness =
+# 遇到網路異常或 429 錯誤時的重試次數
+max_retries = 2
+
+[Perplexity]
+# 透過 OpenRouter 使用的 Perplexity 模型選項
+model = perplexity/sonar
+# 是否在提示詞中要求引用來源
+citations = true
+# 隨機度 (0.0 到 1.0)
+temperature = 0.1
+# 最大回傳 Token 數
+max_tokens = 1024
+# 遇到網路異常或 429 錯誤時的重試次數
+max_retries = 2

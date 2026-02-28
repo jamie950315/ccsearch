@@ -1,0 +1,16 @@
+# Configuration file containing API keys
+config.ini
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Environment files
+.env
+.env.local
