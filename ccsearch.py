@@ -13,7 +13,7 @@ import requests
 
 def load_config(config_file):
     config = configparser.ConfigParser()
-    # 預設設定
+    # Default settings
     config['Brave'] = {
         'requests_per_second': '1',
         'count': '10',
@@ -34,7 +34,7 @@ def load_config(config_file):
     return config
 
 def retry_request(method, url, max_retries, **kwargs):
-    """帶有簡單 Exponential Backoff 機制的請求包裝函數"""
+    """Request wrapper with a simple Exponential Backoff mechanism"""
     for attempt in range(max_retries + 1):
         try:
             if method.upper() == 'GET':
@@ -44,7 +44,7 @@ def retry_request(method, url, max_retries, **kwargs):
             response.raise_for_status()
             return response
         except (requests.exceptions.RequestException) as e:
-            # HTTP 4xx 客戶端錯誤通常不重試（除非是 429 Too Many Requests）
+            # Avoid retrying standard HTTP 4xx client errors (unless it's 429 Too Many Requests)
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
                     raise e
@@ -73,7 +73,7 @@ def perform_brave_search(query, api_key, config, offset=None):
     if offset is not None:
         params['offset'] = offset
 
-    # 處理速率限制
+    # Handle rate limiting
     rps = config.getfloat('Brave', 'requests_per_second', fallback=1.0)
     if rps > 0:
         time.sleep(1.0 / rps)
@@ -138,11 +138,11 @@ def perform_perplexity_search(query, api_key, config):
 
 def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
-    parser.add_argument("query", help="要搜尋的問題或關鍵字 (The search query)")
-    parser.add_argument("-e", "--engine", choices=["brave", "perplexity"], required=True, help="使用的搜尋引擎 (Search engine)")
-    parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="設定檔路徑 (Path to config INI file)")
-    parser.add_argument("--format", choices=["json", "text"], default="json", help="輸出格式 (Output format: json or text)")
-    parser.add_argument("--offset", type=int, default=None, help="Brave Search 分頁位移 (Pagination offset for Brave only)")
+    parser.add_argument("query", help="The search query or keyword")
+    parser.add_argument("-e", "--engine", choices=["brave", "perplexity"], required=True, help="Search engine to use")
+    parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
+    parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
+    parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
 
     args = parser.parse_args()
     config = load_config(args.config)
@@ -151,7 +151,7 @@ def main():
         if args.engine == "brave":
             api_key = os.environ.get("BRAVE_API_KEY")
             if not api_key:
-                sys.stderr.write("錯誤 (ERROR): 找不到 BRAVE_API_KEY 環境變數。\n請設定環境變數: export BRAVE_API_KEY='your_key'\n")
+                sys.stderr.write("ERROR: BRAVE_API_KEY environment variable not found.\nPlease set it using: export BRAVE_API_KEY='your_key'\n")
                 sys.exit(1)
 
             result = perform_brave_search(args.query, api_key, config, offset=args.offset)
@@ -159,7 +159,7 @@ def main():
         elif args.engine == "perplexity":
             api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
-                sys.stderr.write("錯誤 (ERROR): 找不到 OPENROUTER_API_KEY 環境變數。\n請設定環境變數: export OPENROUTER_API_KEY='your_key'\n")
+                sys.stderr.write("ERROR: OPENROUTER_API_KEY environment variable not found.\nPlease set it using: export OPENROUTER_API_KEY='your_key'\n")
                 sys.exit(1)
 
             result = perform_perplexity_search(args.query, api_key, config)
@@ -176,16 +176,16 @@ def main():
                 print(result["answer"])
 
     except requests.exceptions.HTTPError as e:
-        sys.stderr.write(f"API 請求錯誤 (HTTP Error): {e}\n")
-        # 如果有詳細的錯誤訊息，嘗試印出來
+        sys.stderr.write(f"HTTP Error: {e}\n")
+        # Attempt to print detailed error payload if available
         if getattr(e, 'response', None) is not None:
              sys.stderr.write(f"Response: {e.response.text}\n")
         sys.exit(1)
     except requests.exceptions.Timeout as e:
-        sys.stderr.write(f"連線逾時 (Timeout Error): 請求花費了過多時間沒有回應\n{e}\n")
+        sys.stderr.write(f"Timeout Error: Request took too long to respond.\n{e}\n")
         sys.exit(1)
     except Exception as e:
-        sys.stderr.write(f"發生未預期的錯誤 (Unexpected error): {e}\n")
+        sys.stderr.write(f"Unexpected error: {e}\n")
         sys.exit(1)
 
 if __name__ == "__main__":

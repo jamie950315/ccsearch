@@ -1,23 +1,44 @@
 [Brave]
-# 限制 Brave Search API 的每秒請求數
+# Rate limiting: Maximum number of requests allowed per second.
+# Prevents getting banned. Set according to your API tier (e.g., 1 for free tier).
 requests_per_second = 1
-# 每次搜尋回傳的最大結果筆數
+
+# Number of search results to return per query (max 20 for free tier, default is 10).
 count = 10
-# 內容過濾: off, moderate, strict
+
+# Content filtering level for search results.
+# Allowed values: off, moderate, strict
 safesearch = moderate
-# 搜尋時間範圍: 空白為不限, pd (過去24小時), pw (過去一週), pm (過去一個月), py (過去一年)
+
+# Time-based filtering (how recent the results should be).
+# Allowed values:
+#   (leave blank for no limit)
+#   pd (Past 24 hours)
+#   pw (Past week)
+#   pm (Past month)
+#   py (Past year)
 freshness =
-# 遇到網路異常或 429 錯誤時的重試次數
+
+# Number of times to auto-retry the request if a timeout or network error occurs.
+# Uses exponential backoff (e.g., waits 1s, 2s, 4s before trying again).
 max_retries = 2
 
 [Perplexity]
-# 透過 OpenRouter 使用的 Perplexity 模型選項
+# The specific language model to use via OpenRouter for generating answers.
+# Examples: perplexity/sonar, perplexity/sonar-pro
 model = perplexity/sonar
-# 是否在提示詞中要求引用來源
+
+# If true, forces the system prompt to instruct the model to include markdown citations (e.g., [1], [2]).
 citations = true
-# 隨機度 (0.0 到 1.0)
+
+# Controls the randomness of the output. Range: 0.0 to 1.0.
+# Lower values (e.g., 0.1) make the output more deterministic and factual.
 temperature = 0.1
-# 最大回傳 Token 數
+
+# Hard limit for the maximum number of tokens to generate in the response.
+# Useful for controlling API costs and generation time.
 max_tokens = 1024
-# 遇到網路異常或 429 錯誤時的重試次數
+
+# Number of times to auto-retry the request if a timeout or network error occurs.
+# Uses exponential backoff.
 max_retries = 2
