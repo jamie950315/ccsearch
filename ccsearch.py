@@ -140,7 +140,7 @@ def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
     parser.add_argument("query", help="要搜尋的問題或關鍵字 (The search query)")
     parser.add_argument("-e", "--engine", choices=["brave", "perplexity"], required=True, help="使用的搜尋引擎 (Search engine)")
-    parser.add_argument("-c", "--config", default="config.ini", help="設定檔路徑 (Path to config INI file)")
+    parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="設定檔路徑 (Path to config INI file)")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="輸出格式 (Output format: json or text)")
     parser.add_argument("--offset", type=int, default=None, help="Brave Search 分頁位移 (Pagination offset for Brave only)")
 
