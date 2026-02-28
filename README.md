@@ -8,16 +8,21 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 
 ## Requirements & Setup
 
-1. Install Python dependencies:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/jamie950315/ccsearch.git
+   cd ccsearch
+   ```
+2. Install Python dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Copy the example configuration:
+3. Copy the example configuration:
    ```bash
    cp config.ini.example config.ini
    ```
    *Modify `config.ini` to adjust rate limits, models, filtering, or retry logic.*
-3. Set your Environment Variables:
+4. Set your Environment Variables:
    - For Brave: `export BRAVE_API_KEY="your_brave_api_key"`
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
