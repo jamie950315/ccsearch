@@ -10,6 +10,8 @@ import time
 import argparse
 import configparser
 import requests
+import hashlib
+import concurrent.futures
 
 def load_config(config_file):
     config = configparser.ConfigParser()
@@ -32,6 +34,38 @@ def load_config(config_file):
     if os.path.exists(config_file):
         config.read(config_file)
     return config
+
+def get_cache_dir():
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "ccsearch")
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+def get_cache_key(query, engine, offset):
+    key_string = f"{query}_{engine}_{offset}"
+    return hashlib.md5(key_string.encode('utf-8')).hexdigest() + ".json"
+
+def read_from_cache(query, engine, offset, ttl_minutes):
+    cache_file = os.path.join(get_cache_dir(), get_cache_key(query, engine, offset))
+    if not os.path.exists(cache_file):
+        return None
+
+    file_age = time.time() - os.path.getmtime(cache_file)
+    if file_age > (ttl_minutes * 60):
+        return None # Cache expired
+
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None # Return None if cache file is corrupted
+
+def write_to_cache(query, engine, offset, result):
+    cache_file = os.path.join(get_cache_dir(), get_cache_key(query, engine, offset))
+    try:
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False)
+    except Exception as e:
+        sys.stderr.write(f"Warning: Failed to write to cache: {e}\n")
 
 def retry_request(method, url, max_retries, **kwargs):
     """Request wrapper with a simple Exponential Backoff mechanism"""
@@ -136,8 +170,6 @@ def perform_perplexity_search(query, api_key, config):
         "answer": content
     }
 
-import concurrent.futures
-
 def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset=None):
     """Run both Brave and Perplexity searches concurrently and merge results"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -170,42 +202,57 @@ def main():
     parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
+    parser.add_argument("--cache", action="store_true", help="Enable results caching")
+    parser.add_argument("--cache-ttl", type=int, default=10, help="Cache Time-To-Live in minutes (default: 10)")
 
     args = parser.parse_args()
     config = load_config(args.config)
 
     try:
-        if args.engine == "brave":
-            api_key = os.environ.get("BRAVE_API_KEY")
-            if not api_key:
-                sys.stderr.write("ERROR: BRAVE_API_KEY environment variable not found.\nPlease set it using: export BRAVE_API_KEY='your_key'\n")
-                sys.exit(1)
-            result = perform_brave_search(args.query, api_key, config, offset=args.offset)
+        result = None
+        if args.cache:
+            result = read_from_cache(args.query, args.engine, args.offset, args.cache_ttl)
+            if result:
+                result["_from_cache"] = True
 
-        elif args.engine == "perplexity":
-            api_key = os.environ.get("OPENROUTER_API_KEY")
-            if not api_key:
-                sys.stderr.write("ERROR: OPENROUTER_API_KEY environment variable not found.\nPlease set it using: export OPENROUTER_API_KEY='your_key'\n")
-                sys.exit(1)
-            result = perform_perplexity_search(args.query, api_key, config)
+        if not result:
+            if args.engine == "brave":
+                api_key = os.environ.get("BRAVE_API_KEY")
+                if not api_key:
+                    sys.stderr.write("ERROR: BRAVE_API_KEY environment variable not found.\nPlease set it using: export BRAVE_API_KEY='your_key'\n")
+                    sys.exit(1)
+                result = perform_brave_search(args.query, api_key, config, offset=args.offset)
 
-        elif args.engine == "both":
-            brave_api_key = os.environ.get("BRAVE_API_KEY")
-            perplexity_api_key = os.environ.get("OPENROUTER_API_KEY")
-            if not brave_api_key or not perplexity_api_key:
-                sys.stderr.write("ERROR: Both BRAVE_API_KEY and OPENROUTER_API_KEY are required for 'both' engine.\n")
-                sys.exit(1)
-            result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
+            elif args.engine == "perplexity":
+                api_key = os.environ.get("OPENROUTER_API_KEY")
+                if not api_key:
+                    sys.stderr.write("ERROR: OPENROUTER_API_KEY environment variable not found.\nPlease set it using: export OPENROUTER_API_KEY='your_key'\n")
+                    sys.exit(1)
+                result = perform_perplexity_search(args.query, api_key, config)
+
+            elif args.engine == "both":
+                brave_api_key = os.environ.get("BRAVE_API_KEY")
+                perplexity_api_key = os.environ.get("OPENROUTER_API_KEY")
+                if not brave_api_key or not perplexity_api_key:
+                    sys.stderr.write("ERROR: Both BRAVE_API_KEY and OPENROUTER_API_KEY are required for 'both' engine.\n")
+                    sys.exit(1)
+                result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
+
+            if args.cache:
+                write_to_cache(args.query, args.engine, args.offset, result)
 
         if args.format == "json":
             print(json.dumps(result, indent=2, ensure_ascii=False))
         else:
+            if result.get("_from_cache"):
+                print(f"[Returning Cached Result - {args.cache_ttl}min TTL]\n")
+
             if args.engine == "brave":
                 print(f"Brave Search Results for: {args.query}\n")
                 for idx, res in enumerate(result["results"], 1):
                     print(f"{idx}. {res['title']}\n   URL: {res['url']}\n   {res['description']}\n")
             elif args.engine == "perplexity":
-                print(f"Perplexity Search Answer ({result['model']}):\n")
+                print(f"Perplexity Search Answer ({result.get('model', 'unknown')}):\n")
                 print(result["answer"])
             elif args.engine == "both":
                 print(f"--- Synthesized Answer (Perplexity) ---\n")

@@ -43,6 +43,19 @@ python ccsearch.py "What is the difference between Vue 3 and React 18?" -e perpl
 python ccsearch.py "What is the new React compiler?" -e both --format text
 ```
 
+## Advanced Usage
+
+### Caching Results
+To save API credits and retrieve results instantly for repeated queries, use the built-in filesystem cache:
+```bash
+# Cache the result for the default 10 minutes
+python ccsearch.py "React 19 release date" -e perplexity --cache
+
+# Cache the result for a custom duration (e.g., 60 minutes)
+python ccsearch.py "React 19 release date" -e perplexity --cache --cache-ttl 60
+```
+*Note: The cache uses a hashed key based on the query, engine, and offset. Cache files are stored in `~/.cache/ccsearch/`.*
+
 ## Advanced Configuration (`config.ini`)
 
 You can deeply customize tool behavior by adjusting `config.ini`:
@@ -109,10 +122,10 @@ Copy and paste the snippet below into your `CLAUDE.md`:
 - **How to Use Examples (always use `--format json` for agents):**
   1. For finding specific links, documentation, or diverse web sources:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json`
-  2. For broad questions requiring a synthesized answer from the web:
-     `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json`
+  2. For broad questions requiring a synthesized answer from the web (Use `--cache` to save time on repeated inquiries):
+     `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json --cache`
   3. For complex research requiring BOTH an intelligent summary and raw URLs to read further:
-     `ccsearch "Next.js app router architecture" -e both --format json`
+     `ccsearch "Next.js app router architecture" -e both --format json --cache`
   4. If you didn't find what you need via Brave, you can fetch the next page of results:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
