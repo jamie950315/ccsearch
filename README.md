@@ -23,7 +23,13 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
    cp config.ini.example config.ini
    ```
    *Modify `config.ini` to adjust rate limits, models, filtering, or retry logic.*
-4. Set your Environment Variables:
+4. Add it to your CLI `$PATH` for global use:
+   ```bash
+   mkdir -p ~/.local/bin
+   ln -sf $(pwd)/ccsearch.py ~/.local/bin/ccsearch
+   ```
+   *(Ensure `~/.local/bin` is in your environment's PATH so you can just run `ccsearch` from anywhere)*
+5. Set your Environment Variables:
    - For Brave: `export BRAVE_API_KEY="your_brave_api_key"`
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
@@ -31,16 +37,16 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 
 ```bash
 # Brave Search (Text Output)
-python ccsearch.py "latest React documentation" -e brave --format text
+ccsearch "latest React documentation" -e brave --format text
 
 # Brave Search (2nd page of results using offset)
-python ccsearch.py "latest React documentation" -e brave --format text --offset 1
+ccsearch "latest React documentation" -e brave --format text --offset 1
 
 # Perplexity Synthesis (Text Output)
-python ccsearch.py "What is the difference between Vue 3 and React 18?" -e perplexity --format text
+ccsearch "What is the difference between Vue 3 and React 18?" -e perplexity --format text
 
 # Both Engines Concurrently (Merged Text Output)
-python ccsearch.py "What is the new React compiler?" -e both --format text
+ccsearch "What is the new React compiler?" -e both --format text
 ```
 
 ## Advanced Usage
@@ -49,10 +55,10 @@ python ccsearch.py "What is the new React compiler?" -e both --format text
 To save API credits and retrieve results instantly for repeated queries, use the built-in filesystem cache:
 ```bash
 # Cache the result for the default 10 minutes
-python ccsearch.py "React 19 release date" -e perplexity --cache
+ccsearch "React 19 release date" -e perplexity --cache
 
 # Cache the result for a custom duration (e.g., 60 minutes)
-python ccsearch.py "React 19 release date" -e perplexity --cache --cache-ttl 60
+ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
 *Note: The cache uses a hashed key based on the query, engine, and offset. Cache files are stored in `~/.cache/ccsearch/`.*
 
@@ -89,7 +95,7 @@ When the user asks you a question that requires up-to-date knowledge, run the py
 
 **Brave Search Example:**
 ```bash
-python ccsearch.py "anthropic claude 3.5 sonnet release date" -e brave --format json
+ccsearch "anthropic claude 3.5 sonnet release date" -e brave --format json
 ```
 *Use this when you need to research specific websites, gather URLs, or need diverse sources.*
 
@@ -97,7 +103,7 @@ python ccsearch.py "anthropic claude 3.5 sonnet release date" -e brave --format 
 
 **Both Engines Example:**
 ```bash
-python ccsearch.py "what are the architectural differences between Next.js app router and pages router" -e both --format json
+ccsearch "what are the architectural differences between Next.js app router and pages router" -e both --format json
 ```
 *Use this when you need a deeply synthesized answer but ALSO need immediate access to primary source URLs to read further context in the same query.*
 
