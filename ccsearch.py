@@ -12,6 +12,7 @@ import configparser
 import requests
 import hashlib
 import concurrent.futures
+from bs4 import BeautifulSoup
 
 def load_config(config_file):
     config = configparser.ConfigParser()
@@ -195,10 +196,51 @@ def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset
         "perplexity_answer": perplexity_result.get("answer", "")
     }
 
+def perform_fetch(url, max_retries=2):
+    """Fetch and extract clean text from a webpage"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+
+    try:
+        response = retry_request('GET', url, max_retries, headers=headers, timeout=(10, 30))
+
+        # Parse HTML
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+            script.extract()
+
+        # Get text
+        text = soup.get_text(separator='\n')
+
+        # Break into lines and remove leading/trailing space on each
+        lines = (line.strip() for line in text.splitlines())
+        # Break multi-headlines into a line each
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        # Drop blank lines
+        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
+
+        return {
+            "engine": "fetch",
+            "url": url,
+            "title": soup.title.string.strip() if soup.title and soup.title.string else "No Title",
+            "content": clean_text
+        }
+    except Exception as e:
+        return {
+            "engine": "fetch",
+            "url": url,
+            "error": str(e)
+        }
+
 def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
-    parser.add_argument("query", help="The search query or keyword")
-    parser.add_argument("-e", "--engine", choices=["brave", "perplexity", "both"], required=True, help="Search engine to use (brave, perplexity, or both)")
+    parser.add_argument("query", help="The search query, keyword, or URL (for fetch engine)")
+    parser.add_argument("-e", "--engine", choices=["brave", "perplexity", "both", "fetch"], required=True, help="Search engine to use (brave, perplexity, both, or fetch)")
     parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
@@ -238,6 +280,14 @@ def main():
                     sys.exit(1)
                 result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
 
+            elif args.engine == "fetch":
+                # Ensure the query looks like a valid URL
+                if not args.query.startswith("http"):
+                    sys.stderr.write("ERROR: For 'fetch' engine, the query must be a valid HTTP or HTTPS URL.\n")
+                    sys.exit(1)
+                max_retries = config.getint('Brave', 'max_retries', fallback=2) # borrow max_retries setting
+                result = perform_fetch(args.query, max_retries)
+
             if args.cache:
                 write_to_cache(args.query, args.engine, args.offset, result)
 
@@ -260,6 +310,13 @@ def main():
                 print(f"\n\n--- Source Reference Links (Brave) ---\n")
                 for idx, res in enumerate(result["brave_results"], 1):
                     print(f"{idx}. {res['title']}\n   URL: {res['url']}\n   {res['description']}\n")
+            elif args.engine == "fetch":
+                if "error" in result:
+                    print(f"Error fetching URL: {result['error']}\n")
+                else:
+                    print(f"--- Fetched Content: {result['title']} ---\n")
+                    print(f"URL: {result['url']}\n")
+                    print(result["content"])
 
     except requests.exceptions.HTTPError as e:
         sys.stderr.write(f"HTTP Error: {e}\n")

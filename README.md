@@ -6,6 +6,7 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 1. **Brave Search** (via Brave Data for Search API): Best for getting a list of fast, accurate links and snippets. Supports pagination (`--offset`), safsearch, and time-based filtering.
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
+4. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough.
 
 ## Requirements & Setup
 
@@ -47,6 +48,9 @@ ccsearch "What is the difference between Vue 3 and React 18?" -e perplexity --fo
 
 # Both Engines Concurrently (Merged Text Output)
 ccsearch "What is the new React compiler?" -e both --format text
+
+# Fetch a webpage's clean text
+ccsearch "https://react.dev/blog/2025/10/07/react-compiler-1" -e fetch --format text
 ```
 
 ## Advanced Usage
@@ -107,6 +111,12 @@ ccsearch "what are the architectural differences between Next.js app router and 
 ```
 *Use this when you need a deeply synthesized answer but ALSO need immediate access to primary source URLs to read further context in the same query.*
 
+**Fetch Webpage Example:**
+```bash
+ccsearch "https://eslint.org/docs/latest/rules/no-unused-vars" -e fetch --format json
+```
+*Use this when a prior search returned a promising URL, but the snippet wasn't detailed enough and you need to read the full page content.*
+
 ### Error Handling
 - If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
@@ -134,5 +144,7 @@ Copy and paste the snippet below into your `CLAUDE.md`:
      `ccsearch "Next.js app router architecture" -e both --format json --cache`
   4. If you didn't find what you need via Brave, you can fetch the next page of results:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
+  5. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
+     `ccsearch "https://react.dev/reference/react" -e fetch --format json`
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
 ```
