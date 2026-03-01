@@ -136,10 +136,37 @@ def perform_perplexity_search(query, api_key, config):
         "answer": content
     }
 
+import concurrent.futures
+
+def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset=None):
+    """Run both Brave and Perplexity searches concurrently and merge results"""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_brave = executor.submit(perform_brave_search, query, brave_api_key, config, offset)
+        future_perplexity = executor.submit(perform_perplexity_search, query, perplexity_api_key, config)
+
+        try:
+            brave_result = future_brave.result()
+        except Exception as e:
+            sys.stderr.write(f"Warning: Brave search failed during merged request: {e}\n")
+            brave_result = {"engine": "brave", "query": query, "results": [], "error": str(e)}
+
+        try:
+            perplexity_result = future_perplexity.result()
+        except Exception as e:
+            sys.stderr.write(f"Warning: Perplexity search failed during merged request: {e}\n")
+            perplexity_result = {"engine": "perplexity", "model": config.get('Perplexity', 'model', fallback='perplexity/sonar'), "query": query, "answer": "", "error": str(e)}
+
+    return {
+        "engine": "both",
+        "query": query,
+        "brave_results": brave_result.get("results", []),
+        "perplexity_answer": perplexity_result.get("answer", "")
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
     parser.add_argument("query", help="The search query or keyword")
-    parser.add_argument("-e", "--engine", choices=["brave", "perplexity"], required=True, help="Search engine to use")
+    parser.add_argument("-e", "--engine", choices=["brave", "perplexity", "both"], required=True, help="Search engine to use (brave, perplexity, or both)")
     parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
@@ -153,7 +180,6 @@ def main():
             if not api_key:
                 sys.stderr.write("ERROR: BRAVE_API_KEY environment variable not found.\nPlease set it using: export BRAVE_API_KEY='your_key'\n")
                 sys.exit(1)
-
             result = perform_brave_search(args.query, api_key, config, offset=args.offset)
 
         elif args.engine == "perplexity":
@@ -161,8 +187,15 @@ def main():
             if not api_key:
                 sys.stderr.write("ERROR: OPENROUTER_API_KEY environment variable not found.\nPlease set it using: export OPENROUTER_API_KEY='your_key'\n")
                 sys.exit(1)
-
             result = perform_perplexity_search(args.query, api_key, config)
+
+        elif args.engine == "both":
+            brave_api_key = os.environ.get("BRAVE_API_KEY")
+            perplexity_api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not brave_api_key or not perplexity_api_key:
+                sys.stderr.write("ERROR: Both BRAVE_API_KEY and OPENROUTER_API_KEY are required for 'both' engine.\n")
+                sys.exit(1)
+            result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
 
         if args.format == "json":
             print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -174,6 +207,12 @@ def main():
             elif args.engine == "perplexity":
                 print(f"Perplexity Search Answer ({result['model']}):\n")
                 print(result["answer"])
+            elif args.engine == "both":
+                print(f"--- Synthesized Answer (Perplexity) ---\n")
+                print(result["perplexity_answer"])
+                print(f"\n\n--- Source Reference Links (Brave) ---\n")
+                for idx, res in enumerate(result["brave_results"], 1):
+                    print(f"{idx}. {res['title']}\n   URL: {res['url']}\n   {res['description']}\n")
 
     except requests.exceptions.HTTPError as e:
         sys.stderr.write(f"HTTP Error: {e}\n")

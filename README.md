@@ -5,6 +5,7 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 ## Supported Engines
 1. **Brave Search** (via Brave Data for Search API): Best for getting a list of fast, accurate links and snippets. Supports pagination (`--offset`), safsearch, and time-based filtering.
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
+3. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
 
 ## Requirements & Setup
 
@@ -37,6 +38,9 @@ python ccsearch.py "latest React documentation" -e brave --format text --offset 
 
 # Perplexity Synthesis (Text Output)
 python ccsearch.py "What is the difference between Vue 3 and React 18?" -e perplexity --format text
+
+# Both Engines Concurrently (Merged Text Output)
+python ccsearch.py "What is the new React compiler?" -e both --format text
 ```
 
 ## Advanced Configuration (`config.ini`)
@@ -78,11 +82,11 @@ python ccsearch.py "anthropic claude 3.5 sonnet release date" -e brave --format 
 
 *(Agent Tip: If you didn't find what you need in the first 10 results, you can fetch the next page by adding `--offset 1`)*
 
-**Perplexity Example:**
+**Both Engines Example:**
 ```bash
-python ccsearch.py "summary of the latest AI news this week" -e perplexity --format json
+python ccsearch.py "what are the architectural differences between Next.js app router and pages router" -e both --format json
 ```
-*Use this when you want a synthesized summary or direct answer instead of raw links.*
+*Use this when you need a deeply synthesized answer but ALSO need immediate access to primary source URLs to read further context in the same query.*
 
 ### Error Handling
 - If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
@@ -107,7 +111,9 @@ Copy and paste the snippet below into your `CLAUDE.md`:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json`
   2. For broad questions requiring a synthesized answer from the web:
      `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json`
-  3. If you didn't find what you need via Brave, you can fetch the next page of results:
+  3. For complex research requiring BOTH an intelligent summary and raw URLs to read further:
+     `ccsearch "Next.js app router architecture" -e both --format json`
+  4. If you didn't find what you need via Brave, you can fetch the next page of results:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
 ```
