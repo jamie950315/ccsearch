@@ -31,6 +31,11 @@ def load_config(config_file):
         'max_tokens': '1024',
         'max_retries': '2'
     }
+    config['Fetch'] = {
+        'flaresolverr_url': '',
+        'flaresolverr_timeout': '60000',
+        'flaresolverr_mode': 'fallback'
+    }
 
     if os.path.exists(config_file):
         config.read(config_file)
@@ -196,46 +201,111 @@ def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset
         "perplexity_answer": perplexity_result.get("answer", "")
     }
 
-def perform_fetch(url, max_retries=2):
-    """Fetch and extract clean text from a webpage"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    }
+FETCH_HEADERS={
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5"
+}
 
+CLOUDFLARE_INDICATORS=[
+    "Checking your browser",
+    "cf-browser-verification",
+    "challenge-platform"
+]
+
+def _clean_html(html):
+    """Parse HTML and extract clean text content. Returns (title, cleanText)."""
+    soup=BeautifulSoup(html, 'html.parser')
+    title=soup.title.string.strip() if soup.title and soup.title.string else "No Title"
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        tag.extract()
+    text=soup.get_text(separator='\n')
+    lines=(line.strip() for line in text.splitlines())
+    chunks=(phrase.strip() for line in lines for phrase in line.split("  "))
+    cleanText='\n'.join(chunk for chunk in chunks if chunk)
+    return title, cleanText
+
+def _detect_cloudflare(response):
+    """Check if an HTTP response contains Cloudflare challenge indicators."""
+    responseText=response.text
+    if '<title>Just a moment...</title>' in responseText:
+        return True
+    for indicator in CLOUDFLARE_INDICATORS:
+        if indicator in responseText:
+            return True
+    if len(response.content)<1024 and response.headers.get('cf-ray'):
+        return True
+    return False
+
+def _simple_fetch(url, maxRetries=2):
+    """Fetch a webpage using bare requests.get()."""
+    return retry_request('GET', url, maxRetries, headers=FETCH_HEADERS, timeout=(10, 30))
+
+def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
+    """Fetch a webpage through FlareSolverr proxy."""
+    payload={"cmd": "request.get", "url": url, "maxTimeout": timeout}
+    httpTimeout=(10, timeout/1000+10)
+    response=requests.post(flaresolverrUrl, json=payload, timeout=httpTimeout)
+    data=response.json()
+    if data.get("status")!="ok":
+        raise Exception(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
+    return data["solution"]["response"]
+
+def perform_fetch(url, config):
+    """Fetch and extract clean text from a webpage with optional FlareSolverr fallback."""
+    flaresolverrUrl=config.get('Fetch', 'flaresolverr_url', fallback='').strip()
+    flaresolverrTimeout=config.getint('Fetch', 'flaresolverr_timeout', fallback=60000)
+    flaresolverrMode=config.get('Fetch', 'flaresolverr_mode', fallback='fallback').strip().lower()
+    maxRetries=config.getint('Brave', 'max_retries', fallback=2)
+    useAlways=flaresolverrMode=="always" and flaresolverrUrl
+    canFallback=flaresolverrMode=="fallback" and flaresolverrUrl
+
+    # Always mode: skip simple fetch, go directly to FlareSolverr
+    if useAlways:
+        try:
+            sys.stderr.write("[ccsearch] Using FlareSolverr (always mode)...\n")
+            html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+            sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
+            title, cleanText=_clean_html(html)
+            return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "flaresolverr"}
+        except Exception as e:
+            return {"engine": "fetch", "url": url, "error": f"FlareSolverr failed: {e}"}
+
+    # Try simple fetch first
+    simpleFetchErr=None
+    response=None
     try:
-        response = retry_request('GET', url, max_retries, headers=headers, timeout=(10, 30))
-
-        # Parse HTML
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-            script.extract()
-
-        # Get text
-        text = soup.get_text(separator='\n')
-
-        # Break into lines and remove leading/trailing space on each
-        lines = (line.strip() for line in text.splitlines())
-        # Break multi-headlines into a line each
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        # Drop blank lines
-        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
-
-        return {
-            "engine": "fetch",
-            "url": url,
-            "title": soup.title.string.strip() if soup.title and soup.title.string else "No Title",
-            "content": clean_text
-        }
+        response=_simple_fetch(url, maxRetries)
     except Exception as e:
-        return {
-            "engine": "fetch",
-            "url": url,
-            "error": str(e)
-        }
+        simpleFetchErr=e
+
+    # Simple fetch succeeded — check for Cloudflare challenge
+    if response is not None:
+        if canFallback and _detect_cloudflare(response):
+            sys.stderr.write("[ccsearch] Cloudflare detected, falling back to FlareSolverr...\n")
+            try:
+                html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+                sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
+                title, cleanText=_clean_html(html)
+                return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "flaresolverr"}
+            except Exception as flareErr:
+                return {"engine": "fetch", "url": url, "error": f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}"}
+        # No Cloudflare or no fallback configured — use direct response
+        title, cleanText=_clean_html(response.content)
+        return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "direct"}
+
+    # Simple fetch failed — try FlareSolverr fallback
+    if canFallback:
+        sys.stderr.write(f"[ccsearch] Direct fetch failed ({simpleFetchErr}), falling back to FlareSolverr...\n")
+        try:
+            html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+            sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
+            title, cleanText=_clean_html(html)
+            return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "flaresolverr"}
+        except Exception as flareErr:
+            return {"engine": "fetch", "url": url, "error": f"Direct fetch failed: {simpleFetchErr} | FlareSolverr also failed: {flareErr}"}
+
+    return {"engine": "fetch", "url": url, "error": str(simpleFetchErr)}
 
 def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
@@ -246,6 +316,7 @@ def main():
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
     parser.add_argument("--cache", action="store_true", help="Enable results caching")
     parser.add_argument("--cache-ttl", type=int, default=10, help="Cache Time-To-Live in minutes (default: 10)")
+    parser.add_argument("--flaresolverr", action="store_true", help="Force FlareSolverr mode for fetch engine (overrides config flaresolverr_mode to 'always')")
 
     args = parser.parse_args()
     config = load_config(args.config)
@@ -281,12 +352,14 @@ def main():
                 result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
 
             elif args.engine == "fetch":
-                # Ensure the query looks like a valid URL
                 if not args.query.startswith("http"):
                     sys.stderr.write("ERROR: For 'fetch' engine, the query must be a valid HTTP or HTTPS URL.\n")
                     sys.exit(1)
-                max_retries = config.getint('Brave', 'max_retries', fallback=2) # borrow max_retries setting
-                result = perform_fetch(args.query, max_retries)
+                if args.flaresolverr:
+                    config.set('Fetch', 'flaresolverr_mode', 'always')
+                    if not config.get('Fetch', 'flaresolverr_url', fallback='').strip():
+                        sys.stderr.write("WARNING: --flaresolverr flag set but no flaresolverr_url configured in config.ini.\n")
+                result=perform_fetch(args.query, config)
 
             if args.cache:
                 write_to_cache(args.query, args.engine, args.offset, result)

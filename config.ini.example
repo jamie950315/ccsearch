@@ -42,3 +42,18 @@ max_tokens = 1024
 # Number of times to auto-retry the request if a timeout or network error occurs.
 # Uses exponential backoff.
 max_retries = 2
+
+[Fetch]
+# FlareSolverr proxy URL for bypassing Cloudflare and rendering JS-heavy pages.
+# Leave blank to disable the fallback (only bare HTTP requests will be used).
+# Requires a running FlareSolverr instance (Docker recommended).
+# Example: http://localhost:8191/v1 or http://pi5.tailnet:8191/v1
+flaresolverr_url =
+
+# Maximum time (ms) to wait for FlareSolverr to solve a challenge.
+flaresolverr_timeout = 60000
+
+# Strategy: "fallback" = try requests.get first, use FlareSolverr only on failure.
+#           "always"   = always use FlareSolverr for every fetch request.
+#           "never"    = never use FlareSolverr even if configured.
+flaresolverr_mode = fallback

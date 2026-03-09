@@ -13,7 +13,12 @@ This is a Python CLI web search utility (`ccsearch`) designed to provide search 
 ## Testing & Usage Commands
 - Run a Brave search (JSON output): `./ccsearch.py "Claude 3.5 Sonnet" -e brave --format json`
 - Run a Perplexity query (Text output): `./ccsearch.py "What is Claude Code?" -e perplexity --format text`
-- *Note:* Requires `BRAVE_API_KEY` or `OPENROUTER_API_KEY` to be set in the environment.
+- Fetch a webpage: `./ccsearch.py "http://example.com" -e fetch --format json`
+- Fetch with forced FlareSolverr: `./ccsearch.py "http://example.com" -e fetch --format json --flaresolverr`
+- Run all unit tests: `python3 -m pytest test_ccsearch.py -v`
+- *Note:* Requires `BRAVE_API_KEY` or `OPENROUTER_API_KEY` to be set in the environment. FlareSolverr requires `flaresolverr_url` to be set in `config.ini`.
 
 ## Architecture
 The script `ccsearch.py` handles CLI parsing through `argparse` and loads defaults from `config.ini`. It makes synchronous HTTP requests using the `requests` library. If an API key is missing, it will gracefully exit with status code 1 and prompt the user (or the invoking LLM tool) to provide the appropriate key.
+
+The `fetch` engine uses a layered approach: `_simple_fetch` (bare `requests.get`) → Cloudflare detection (`_detect_cloudflare`) → optional `_flaresolverr_fetch` fallback. The orchestrator `perform_fetch` reads `[Fetch]` config to decide the execution strategy (`fallback`, `always`, or `never`). FlareSolverr communication is a simple `requests.post()` to its HTTP API — no extra dependencies required.

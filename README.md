@@ -6,7 +6,7 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 1. **Brave Search** (via Brave Data for Search API): Best for getting a list of fast, accurate links and snippets. Supports pagination (`--offset`), safsearch, and time-based filtering.
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-4. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough.
+4. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
 
 ## Requirements & Setup
 
@@ -51,6 +51,9 @@ ccsearch "What is the new React compiler?" -e both --format text
 
 # Fetch a webpage's clean text
 ccsearch "https://react.dev/blog/2025/10/07/react-compiler-1" -e fetch --format text
+
+# Force FlareSolverr for a Cloudflare-protected page
+ccsearch "https://some-cloudflare-site.com" -e fetch --format text --flaresolverr
 ```
 
 ## Advanced Usage
@@ -65,6 +68,38 @@ ccsearch "React 19 release date" -e perplexity --cache
 ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
 *Note: The cache uses a hashed key based on the query, engine, and offset. Cache files are stored in `~/.cache/ccsearch/`.*
+
+## FlareSolverr Integration (Optional)
+
+The `fetch` engine can automatically fall back to [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) when it encounters Cloudflare-protected pages or JS-rendered SPAs. FlareSolverr is a self-hosted proxy that uses a real Chromium browser to solve browser challenges.
+
+### Setup
+1. Run FlareSolverr via Docker:
+   ```bash
+   docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
+   ```
+2. Add the URL to your `config.ini`:
+   ```ini
+   [Fetch]
+   flaresolverr_url = http://localhost:8191/v1
+   flaresolverr_mode = fallback
+   ```
+
+### Modes
+- **`fallback`** (default): Tries a normal HTTP request first. If it fails or detects a Cloudflare challenge, automatically retries through FlareSolverr.
+- **`always`**: Skips the normal request and always uses FlareSolverr. Useful for sites that are known to be protected.
+- **`never`**: Never uses FlareSolverr, even if configured.
+
+You can also force FlareSolverr for a single invocation with the `--flaresolverr` CLI flag:
+```bash
+ccsearch "https://cloudflare-site.com" -e fetch --format json --flaresolverr
+```
+
+### Detection
+The tool automatically detects Cloudflare challenges by checking for:
+- `"Just a moment..."` in the page title
+- `"Checking your browser"`, `"cf-browser-verification"`, or `"challenge-platform"` in the response body
+- Suspiciously short responses (< 1KB) with a `cf-ray` header
 
 ## Advanced Configuration (`config.ini`)
 
@@ -83,6 +118,11 @@ You can deeply customize tool behavior by adjusting `config.ini`:
 - **`temperature`**: Creativity control (`0.0` - `1.0`). Keep low (e.g., `0.1`) for factual answering.
 - **`max_tokens`**: Hard limit on generation length to save costs.
 - **`max_retries`**: Auto-retry count for network anomalies.
+
+### `[Fetch]`
+- **`flaresolverr_url`**: FlareSolverr endpoint URL (e.g., `http://localhost:8191/v1`). Leave blank to disable.
+- **`flaresolverr_timeout`**: Max time in milliseconds for FlareSolverr to solve a challenge (Default: `60000`).
+- **`flaresolverr_mode`**: Strategy: `fallback`, `always`, or `never` (Default: `fallback`).
 
 ---
 
@@ -117,6 +157,12 @@ ccsearch "https://eslint.org/docs/latest/rules/no-unused-vars" -e fetch --format
 ```
 *Use this when a prior search returned a promising URL, but the snippet wasn't detailed enough and you need to read the full page content.*
 
+**Fetch with FlareSolverr (Cloudflare bypass):**
+```bash
+ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr
+```
+*Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. The JSON output includes a `"fetched_via"` field (`"direct"` or `"flaresolverr"`) so you know which method was used. In `fallback` mode (default), Cloudflare is auto-detected and FlareSolverr is used automatically — no flag needed.*
+
 ### Error Handling
 - If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
@@ -146,5 +192,8 @@ Copy and paste the snippet below into your `CLAUDE.md`:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
   5. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
      `ccsearch "https://react.dev/reference/react" -e fetch --format json`
+  6. **If a fetch fails due to Cloudflare protection or JS-rendered content**, force FlareSolverr:
+     `ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr`
+     *(Requires `flaresolverr_url` in `config.ini`. In `fallback` mode, Cloudflare is auto-detected — no flag needed. Check the `"fetched_via"` field in the JSON output to see which method was used.)*
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
 ```
