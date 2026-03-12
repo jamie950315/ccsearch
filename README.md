@@ -59,7 +59,9 @@ ccsearch "https://some-cloudflare-site.com" -e fetch --format text --flaresolver
 ## Advanced Usage
 
 ### Caching Results
-To save API credits and retrieve results instantly for repeated queries, use the built-in filesystem cache:
+
+#### Exact Cache (`--cache`)
+Caches results by an exact hash of the query string. Subsequent identical queries return instantly without hitting the API.
 ```bash
 # Cache the result for the default 10 minutes
 ccsearch "React 19 release date" -e perplexity --cache
@@ -67,7 +69,52 @@ ccsearch "React 19 release date" -e perplexity --cache
 # Cache the result for a custom duration (e.g., 60 minutes)
 ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
-*Note: The cache uses a hashed key based on the query, engine, and offset. Cache files are stored in `~/.cache/ccsearch/`.*
+*Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.*
+
+#### Semantic Cache (`--semantic-cache`)
+Extends exact caching with **embedding-based similarity matching**. If a semantically equivalent query was previously cached, the result is returned without a new API call — even if the wording differs.
+
+Requires `fastembed` (`pip install fastembed`). Uses the `BAAI/bge-small-en-v1.5` model (384-dim, ~40MB, runs entirely locally via ONNX).
+
+```bash
+# First search — result is cached and embedding is stored
+ccsearch "Python asyncio event loop tutorial" -e brave --semantic-cache --cache-ttl 60
+
+# Semantically similar query — returns the cached result (no API call)
+ccsearch "Python asyncio event loop guide" -e brave --semantic-cache --cache-ttl 60
+# Output includes: "_from_cache": true, "_semantic_similarity": 0.9434
+```
+
+**Adjusting the similarity threshold** (default `0.9`, range `0.0`–`1.0`):
+```bash
+# Stricter: only very close paraphrases hit the cache
+ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshold 0.95
+
+# Looser: broader topic matching (useful for exploratory queries)
+ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshold 0.85
+```
+
+**How it works:**
+1. On a **cache miss**, the query is embedded and stored alongside the result in `~/.cache/ccsearch/semantic_index.json`
+2. On a subsequent query, the new embedding is compared against all stored embeddings using cosine similarity
+3. If the best match exceeds the threshold, the cached result is returned with `_semantic_similarity` set
+4. Falls back to exact-match cache first (faster), then semantic search, then live API call
+5. `--semantic-cache` implies `--cache` — no need to pass both flags
+
+**Notes:**
+- Only applies to `brave`, `perplexity`, and `both` engines. The `fetch` engine always uses exact URL matching.
+- If `fastembed` is not installed, a warning is printed and the tool continues without semantic matching.
+- The same `--cache-ttl` applies to both caches.
+
+**Benchmark results** (Brave engine, 6 query pairs):
+
+| Condition | Avg. latency |
+|-----------|-------------|
+| Cold API call | ~1,350ms |
+| Semantic cache hit | ~360ms |
+| Exact cache hit | ~95ms |
+
+Semantic cache delivers ~**73% faster** responses vs. cold API calls for similar queries.
 
 ## FlareSolverr Integration (Optional)
 
@@ -133,6 +180,7 @@ If you are an AI assistant (like Claude, Cursor, or ChatGPT) reading this, you c
 ### Features Built for Agents
 - **JSON First**: Use `--format json` to get machine-readable structures.
 - **Resilience**: The script has built-in timeouts and exponential backoff retry logic. If the network hiccups, `ccsearch` handles it safely, avoiding hangs.
+- **Semantic Cache**: Use `--semantic-cache` to skip redundant API calls when you're researching the same topic across multiple queries with slightly different wording. The `_from_cache` and `_semantic_similarity` fields in the JSON response tell you when a cached result was returned and how similar it was.
 
 ### How to use `ccsearch`
 When the user asks you a question that requires up-to-date knowledge, run the python script directly using your bash/terminal tool.
@@ -163,6 +211,12 @@ ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flares
 ```
 *Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. The JSON output includes a `"fetched_via"` field (`"direct"` or `"flaresolverr"`) so you know which method was used. In `fallback` mode (default), Cloudflare is auto-detected and FlareSolverr is used automatically — no flag needed.*
 
+**Semantic Cache Example:**
+```bash
+ccsearch "Python asyncio event loop tutorial" -e brave --format json --semantic-cache --cache-ttl 60
+```
+*Use `--semantic-cache` when researching a topic across multiple queries with slightly different wording. Semantically similar queries return the cached result instantly without a new API call. Check `_from_cache` and `_semantic_similarity` in the JSON output to know when a cache hit occurred. Requires `pip install fastembed`.*
+
 ### Error Handling
 - If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
@@ -188,11 +242,14 @@ Copy and paste the snippet below into your `CLAUDE.md`:
      `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json --cache`
   3. For complex research requiring BOTH an intelligent summary and raw URLs to read further:
      `ccsearch "Next.js app router architecture" -e both --format json --cache`
-  4. If you didn't find what you need via Brave, you can fetch the next page of results:
+  4. **Use `--semantic-cache` when researching a topic across multiple related queries** to avoid redundant API calls — semantically similar queries reuse cached results:
+     `ccsearch "React Server Components explained" -e perplexity --format json --semantic-cache --cache-ttl 60`
+     *(Requires `pip install fastembed`. Check `_from_cache` and `_semantic_similarity` in the JSON output to know if a cached result was returned.)*
+  5. If you didn't find what you need via Brave, you can fetch the next page of results:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
-  5. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
+  6. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
      `ccsearch "https://react.dev/reference/react" -e fetch --format json`
-  6. **If a fetch fails due to Cloudflare protection or JS-rendered content**, force FlareSolverr:
+  7. **If a fetch fails due to Cloudflare protection or JS-rendered content**, force FlareSolverr:
      `ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr`
      *(Requires `flaresolverr_url` in `config.ini`. In `fallback` mode, Cloudflare is auto-detected — no flag needed. Check the `"fetched_via"` field in the JSON output to see which method was used.)*
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.

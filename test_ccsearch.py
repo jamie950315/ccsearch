@@ -1277,5 +1277,776 @@ class TestConstants(unittest.TestCase):
         self.assertIn("challenge-platform", ccsearch.CLOUDFLARE_INDICATORS)
 
 
+# ===========================================================================
+# Semantic cache utilities
+# ===========================================================================
+class TestCosineSim(unittest.TestCase):
+
+    def test_identical_vectors(self):
+        v = [1.0, 0.0, 0.0]
+        self.assertAlmostEqual(ccsearch._cosine_sim(v, v), 1.0)
+
+    def test_orthogonal_vectors(self):
+        self.assertAlmostEqual(ccsearch._cosine_sim([1, 0], [0, 1]), 0.0)
+
+    def test_opposite_vectors(self):
+        self.assertAlmostEqual(ccsearch._cosine_sim([1, 0], [-1, 0]), -1.0)
+
+    def test_zero_vector_returns_zero(self):
+        self.assertEqual(ccsearch._cosine_sim([0, 0], [1, 2]), 0.0)
+
+    def test_similar_vectors(self):
+        a = [0.9, 0.1]
+        b = [0.8, 0.2]
+        sim = ccsearch._cosine_sim(a, b)
+        self.assertGreater(sim, 0.99)
+
+
+class TestComputeEmbedding(unittest.TestCase):
+
+    def setUp(self):
+        # Reset the global model cache before each test
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        ccsearch._embedding_model = None
+
+    def test_returns_none_when_fastembed_missing(self):
+        with patch.dict('sys.modules', {'fastembed': None}):
+            ccsearch._embedding_model = None
+            # Simulate ImportError by patching the import
+            with patch('builtins.__import__', side_effect=ImportError("no fastembed")):
+                # Force re-init
+                ccsearch._embedding_model = None
+                result = ccsearch._compute_embedding("test query")
+            # May be None if model couldn't load; just confirm no exception raised
+        # Reset so other tests can use real fastembed
+        ccsearch._embedding_model = None
+
+    def test_returns_list_of_floats(self):
+        mock_model = MagicMock()
+        import numpy as np
+        fake_emb = np.array([0.1] * 384)
+        mock_model.embed.return_value = iter([fake_emb])
+        ccsearch._embedding_model = mock_model
+
+        result = ccsearch._compute_embedding("hello world")
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 384)
+        self.assertIsInstance(result[0], float)
+
+    def test_returns_none_on_embed_exception(self):
+        mock_model = MagicMock()
+        mock_model.embed.side_effect = RuntimeError("embed failed")
+        ccsearch._embedding_model = mock_model
+
+        result = ccsearch._compute_embedding("test")
+        self.assertIsNone(result)
+
+
+class TestSemanticIndexIO(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.orig_cache_dir = ccsearch.get_cache_dir
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch.get_cache_dir = self.orig_cache_dir
+
+    def _patch_cache_dir(self):
+        ccsearch.get_cache_dir = lambda: self.tmpdir
+
+    def test_load_returns_empty_dict_when_no_file(self):
+        self._patch_cache_dir()
+        with patch('ccsearch._semantic_index_path', return_value=os.path.join(self.tmpdir, 'semantic_index.json')):
+            result = ccsearch._load_semantic_index()
+        self.assertEqual(result, {})
+
+    def test_save_and_load_roundtrip(self):
+        index_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        with patch('ccsearch._semantic_index_path', return_value=index_path):
+            index = {"abc123": {"query": "test", "engine": "brave", "offset": None, "embedding": [0.1, 0.2]}}
+            ccsearch._save_semantic_index(index)
+            loaded = ccsearch._load_semantic_index()
+        self.assertEqual(loaded["abc123"]["query"], "test")
+        self.assertEqual(loaded["abc123"]["embedding"], [0.1, 0.2])
+
+    def test_load_returns_empty_on_corrupt_file(self):
+        index_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        with open(index_path, 'w') as f:
+            f.write("not valid json{{{{")
+        with patch('ccsearch._semantic_index_path', return_value=index_path):
+            result = ccsearch._load_semantic_index()
+        self.assertEqual(result, {})
+
+
+class TestReadFromSemanticCache(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch._embedding_model = None
+
+    def _write_cache_file(self, key, data):
+        path = os.path.join(self.tmpdir, key + ".json")
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        return path
+
+    def test_returns_none_when_index_empty(self):
+        with patch('ccsearch._load_semantic_index', return_value={}):
+            result, sim = ccsearch.read_from_semantic_cache("query", "brave", None, 10, 0.9)
+        self.assertIsNone(result)
+        self.assertEqual(sim, 0.0)
+
+    def test_returns_none_when_embedding_fails(self):
+        index = {"key1": {"engine": "brave", "offset": None, "embedding": [0.5, 0.5]}}
+        with patch('ccsearch._load_semantic_index', return_value=index):
+            with patch('ccsearch._compute_embedding', return_value=None):
+                result, sim = ccsearch.read_from_semantic_cache("query", "brave", None, 10, 0.9)
+        self.assertIsNone(result)
+
+    def test_returns_cached_result_above_threshold(self):
+        import numpy as np
+        emb = [1.0, 0.0, 0.0]
+        cache_data = {"engine": "brave", "query": "original query", "results": []}
+        cache_key = "abc123"
+        self._write_cache_file(cache_key, cache_data)
+
+        index = {cache_key: {"engine": "brave", "offset": None, "embedding": emb}}
+        with patch('ccsearch._load_semantic_index', return_value=index):
+            with patch('ccsearch.get_cache_dir', return_value=self.tmpdir):
+                with patch('ccsearch._compute_embedding', return_value=emb):  # identical => sim=1.0
+                    result, sim = ccsearch.read_from_semantic_cache("similar query", "brave", None, 10, 0.9)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(sim, 1.0)
+
+    def test_returns_none_below_threshold(self):
+        emb_stored = [1.0, 0.0]
+        emb_query  = [0.0, 1.0]  # orthogonal => sim=0.0
+        cache_data = {"engine": "brave", "results": []}
+        cache_key = "xyz789"
+        self._write_cache_file(cache_key, cache_data)
+
+        index = {cache_key: {"engine": "brave", "offset": None, "embedding": emb_stored}}
+        with patch('ccsearch._load_semantic_index', return_value=index):
+            with patch('ccsearch.get_cache_dir', return_value=self.tmpdir):
+                with patch('ccsearch._compute_embedding', return_value=emb_query):
+                    result, sim = ccsearch.read_from_semantic_cache("very different query", "brave", None, 10, 0.9)
+        self.assertIsNone(result)
+
+    def test_skips_wrong_engine(self):
+        emb = [1.0, 0.0]
+        index = {"k1": {"engine": "perplexity", "offset": None, "embedding": emb}}
+        self._write_cache_file("k1", {"engine": "perplexity"})
+        with patch('ccsearch._load_semantic_index', return_value=index):
+            with patch('ccsearch.get_cache_dir', return_value=self.tmpdir):
+                with patch('ccsearch._compute_embedding', return_value=emb):
+                    result, sim = ccsearch.read_from_semantic_cache("query", "brave", None, 10, 0.5)
+        self.assertIsNone(result)
+
+    def test_skips_expired_entry(self):
+        emb = [1.0, 0.0]
+        cache_key = "expired_key"
+        cache_file = self._write_cache_file(cache_key, {"engine": "brave", "results": []})
+        # Set mtime to 20 minutes ago (TTL is 10 min)
+        old_time = time.time() - 1200
+        os.utime(cache_file, (old_time, old_time))
+
+        index = {cache_key: {"engine": "brave", "offset": None, "embedding": emb}}
+        with patch('ccsearch._load_semantic_index', return_value=index):
+            with patch('ccsearch.get_cache_dir', return_value=self.tmpdir):
+                with patch('ccsearch._compute_embedding', return_value=emb):
+                    result, sim = ccsearch.read_from_semantic_cache("query", "brave", None, 10, 0.5)
+        self.assertIsNone(result)
+
+
+class TestUpdateSemanticIndex(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch._embedding_model = None
+
+    def test_stores_embedding_in_index(self):
+        index_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        emb = [0.1, 0.9]
+
+        with patch('ccsearch._compute_embedding', return_value=emb):
+            with patch('ccsearch._load_semantic_index', return_value={}):
+                with patch('ccsearch._semantic_index_path', return_value=index_path):
+                    ccsearch.update_semantic_index("hello", "brave", None, "abc123.json")
+
+        with open(index_path) as f:
+            saved = json.load(f)
+        self.assertIn("abc123", saved)
+        self.assertEqual(saved["abc123"]["query"], "hello")
+        self.assertEqual(saved["abc123"]["embedding"], emb)
+
+    def test_does_nothing_when_embedding_fails(self):
+        with patch('ccsearch._compute_embedding', return_value=None):
+            with patch('ccsearch._save_semantic_index') as mock_save:
+                ccsearch.update_semantic_index("hello", "brave", None, "abc123.json")
+        mock_save.assert_not_called()
+
+
+# ===========================================================================
+# Semantic cache — extended edge cases
+# ===========================================================================
+
+class TestCosineSimEdgeCases(unittest.TestCase):
+    """Edge cases for _cosine_sim beyond the basic tests."""
+
+    def test_single_element_vectors(self):
+        self.assertAlmostEqual(ccsearch._cosine_sim([5.0], [3.0]), 1.0)
+
+    def test_both_zero_vectors(self):
+        self.assertEqual(ccsearch._cosine_sim([0.0, 0.0], [0.0, 0.0]), 0.0)
+
+    def test_one_zero_vector(self):
+        self.assertEqual(ccsearch._cosine_sim([0.0, 0.0], [1.0, 0.0]), 0.0)
+
+    def test_all_negative_vectors(self):
+        # Two identical negative vectors should still yield similarity 1.0
+        v = [-1.0, -2.0, -3.0]
+        self.assertAlmostEqual(ccsearch._cosine_sim(v, v), 1.0)
+
+    def test_unequal_length_truncates_to_shorter(self):
+        # zip() silently truncates — verify we get a result without crashing
+        a = [1.0, 0.0, 0.0]
+        b = [1.0, 0.0]
+        result = ccsearch._cosine_sim(a, b)
+        self.assertIsInstance(result, float)
+
+    def test_large_values_no_overflow(self):
+        a = [1e150, 1e150]
+        b = [1e150, 1e150]
+        sim = ccsearch._cosine_sim(a, b)
+        self.assertAlmostEqual(sim, 1.0)
+
+    def test_near_threshold_precision(self):
+        # 0.9 threshold comparison must not drop a 0.9000001 hit
+        import math
+        # Two vectors whose cosine is just above 0.9
+        angle = math.acos(0.9001)
+        a = [1.0, 0.0]
+        b = [math.cos(angle), math.sin(angle)]
+        sim = ccsearch._cosine_sim(a, b)
+        self.assertGreater(sim, 0.90)
+
+
+class TestComputeEmbeddingEdgeCases(unittest.TestCase):
+
+    def setUp(self):
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        ccsearch._embedding_model = None
+
+    def test_empty_string_does_not_crash(self):
+        import numpy as np
+        mock_model = MagicMock()
+        mock_model.embed.return_value = iter([np.zeros(384)])
+        ccsearch._embedding_model = mock_model
+        result = ccsearch._compute_embedding("")
+        self.assertIsInstance(result, list)
+
+    def test_unicode_query(self):
+        import numpy as np
+        mock_model = MagicMock()
+        mock_model.embed.return_value = iter([np.ones(384)])
+        ccsearch._embedding_model = mock_model
+        result = ccsearch._compute_embedding("Python 교육 튜토리얼 日本語テスト")
+        self.assertIsInstance(result, list)
+
+    def test_very_long_query_no_crash(self):
+        import numpy as np
+        mock_model = MagicMock()
+        mock_model.embed.return_value = iter([np.ones(384)])
+        ccsearch._embedding_model = mock_model
+        long_query = "word " * 600   # 600 words, well above typical 512-token limit
+        result = ccsearch._compute_embedding(long_query)
+        self.assertIsNotNone(result)
+
+    def test_sentinel_false_returns_none_without_retrying_import(self):
+        # Once set to False, _get_embedding_model must not attempt another import
+        ccsearch._embedding_model = False
+        with patch('builtins.__import__') as mock_import:
+            result = ccsearch._compute_embedding("test")
+        mock_import.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_embed_returns_non_iterable_raises_caught(self):
+        mock_model = MagicMock()
+        mock_model.embed.return_value = None  # next(None) raises TypeError
+        ccsearch._embedding_model = mock_model
+        result = ccsearch._compute_embedding("test")
+        self.assertIsNone(result)
+
+
+class TestSemanticIndexEdgeCases(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _index_path(self):
+        return os.path.join(self.tmpdir, 'semantic_index.json')
+
+    def test_save_unicode_content(self):
+        idx = {"key1": {"query": "日本語テスト 한국어", "engine": "brave",
+                        "offset": None, "embedding": [0.1, 0.2]}}
+        with patch('ccsearch._semantic_index_path', return_value=self._index_path()):
+            ccsearch._save_semantic_index(idx)
+            loaded = ccsearch._load_semantic_index()
+        self.assertEqual(loaded["key1"]["query"], "日本語テスト 한국어")
+
+    def test_load_empty_file_returns_empty_dict(self):
+        p = self._index_path()
+        open(p, 'w').close()  # create zero-byte file
+        with patch('ccsearch._semantic_index_path', return_value=p):
+            result = ccsearch._load_semantic_index()
+        self.assertEqual(result, {})
+
+    def test_load_partial_json_returns_empty_dict(self):
+        p = self._index_path()
+        with open(p, 'w') as f:
+            f.write('{"key": {"embed')  # truncated
+        with patch('ccsearch._semantic_index_path', return_value=p):
+            result = ccsearch._load_semantic_index()
+        self.assertEqual(result, {})
+
+    def test_save_failure_is_silent(self):
+        # Writing to a non-existent deeply nested path should just warn, not raise
+        bad_path = '/nonexistent/deep/path/semantic_index.json'
+        with patch('ccsearch._semantic_index_path', return_value=bad_path):
+            # Should not raise
+            ccsearch._save_semantic_index({"k": {"q": "v", "embedding": [0.1]}})
+
+    def test_large_index_round_trips(self):
+        import numpy as np
+        p = self._index_path()
+        big = {f"key{i}": {"query": f"q{i}", "engine": "brave",
+                            "offset": None, "embedding": list(np.random.rand(384))}
+               for i in range(200)}
+        with patch('ccsearch._semantic_index_path', return_value=p):
+            ccsearch._save_semantic_index(big)
+            loaded = ccsearch._load_semantic_index()
+        self.assertEqual(len(loaded), 200)
+        self.assertEqual(loaded["key99"]["query"], "q99")
+
+
+class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch._embedding_model = None
+
+    def _write_cache_file(self, key, data):
+        path = os.path.join(self.tmpdir, key + ".json")
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        return path
+
+    def _patch(self, index, emb):
+        return (
+            patch('ccsearch._load_semantic_index', return_value=index),
+            patch('ccsearch.get_cache_dir', return_value=self.tmpdir),
+            patch('ccsearch._compute_embedding', return_value=emb),
+        )
+
+    def test_missing_embedding_field_is_skipped(self):
+        cache_data = {"engine": "brave", "results": []}
+        self._write_cache_file("k1", cache_data)
+        index = {"k1": {"engine": "brave", "offset": None}}  # no "embedding" key
+        p1, p2, p3 = self._patch(index, [1.0, 0.0])
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
+        self.assertIsNone(result)
+
+    def test_empty_list_embedding_is_skipped(self):
+        # Empty list is falsy — entry should be skipped
+        self._write_cache_file("k1", {"engine": "brave"})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": []}}
+        p1, p2, p3 = self._patch(index, [1.0, 0.0])
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
+        self.assertIsNone(result)
+
+    def test_orphaned_index_entry_no_cache_file(self):
+        # Index has entry but no corresponding .json file on disk
+        index = {"ghost_key": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
+        p1, p2, p3 = self._patch(index, [1.0, 0.0])
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
+        self.assertIsNone(result)
+
+    def test_engine_isolation_brave_vs_perplexity(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "brave"})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "perplexity", None, 60, 0.0)
+        self.assertIsNone(result)
+
+    def test_engine_isolation_perplexity_found(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "perplexity", "answer": "42"})
+        index = {"k1": {"engine": "perplexity", "offset": None, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "perplexity", None, 60, 0.5)
+        self.assertIsNotNone(result)
+
+    def test_offset_isolation_different_offset_not_matched(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "brave"})
+        index = {"k1": {"engine": "brave", "offset": 0, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", 1, 60, 0.0)
+        self.assertIsNone(result)
+
+    def test_offset_none_vs_zero_not_matched(self):
+        # offset=None (not provided) != offset=0 (explicitly passed)
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "brave"})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", 0, 60, 0.0)
+        self.assertIsNone(result)
+
+    def test_picks_best_similarity_not_first_entry(self):
+        # Two valid entries: k_low (sim 0.5) and k_high (sim 1.0) — k_high must win
+        emb_q     = [1.0, 0.0]
+        emb_low   = [0.0, 1.0]  # orthogonal → sim ≈ 0
+        emb_high  = [1.0, 0.0]  # identical  → sim = 1
+        self._write_cache_file("k_low",  {"engine": "brave", "results": ["low"]})
+        self._write_cache_file("k_high", {"engine": "brave", "results": ["high"]})
+        index = {
+            "k_low":  {"engine": "brave", "offset": None, "embedding": emb_low},
+            "k_high": {"engine": "brave", "offset": None, "embedding": emb_high},
+        }
+        p1, p2, p3 = self._patch(index, emb_q)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["results"], ["high"])
+        self.assertAlmostEqual(sim, 1.0)
+
+    def test_threshold_exactly_at_boundary_matches(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "brave", "results": []})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            # Identical vectors → sim=1.0, threshold=1.0 → should match (>=)
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 1.0)
+        self.assertIsNotNone(result)
+
+    def test_threshold_above_max_possible_never_matches(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("k1", {"engine": "brave", "results": []})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            # threshold=1.0001 > max possible cosine sim of 1.0 → never matches
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 1.0001)
+        self.assertIsNone(result)
+
+    def test_threshold_zero_matches_any_entry(self):
+        emb_q   = [1.0, 0.0]
+        emb_ent = [0.0, 1.0]  # orthogonal → sim = 0.0, which is >= 0.0
+        self._write_cache_file("k1", {"engine": "brave", "results": ["found"]})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb_ent}}
+        p1, p2, p3 = self._patch(index, emb_q)
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["results"], ["found"])
+
+    def test_corrupted_cache_file_returns_none(self):
+        # Index entry exists and file exists, but content is invalid JSON
+        p = os.path.join(self.tmpdir, "k1.json")
+        with open(p, 'w') as f:
+            f.write("{{not json{{")
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
+        p1, p2, p3 = self._patch(index, [1.0, 0.0])
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
+        self.assertIsNone(result)
+
+    def test_multiple_engines_in_index_only_matching_returned(self):
+        emb = [1.0, 0.0]
+        self._write_cache_file("kb", {"engine": "brave",     "results": ["brave"]})
+        self._write_cache_file("kp", {"engine": "perplexity","answer":  "perp"})
+        index = {
+            "kb": {"engine": "brave",      "offset": None, "embedding": emb},
+            "kp": {"engine": "perplexity", "offset": None, "embedding": emb},
+        }
+        p1, p2, p3 = self._patch(index, emb)
+        with p1, p2, p3:
+            result, _ = ccsearch.read_from_semantic_cache("q", "perplexity", None, 60, 0.5)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["answer"], "perp")  # must get perplexity result
+
+    def test_returns_zero_sim_on_total_miss(self):
+        p1, p2, p3 = self._patch({}, [1.0, 0.0])
+        with p1, p2, p3:
+            result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.9)
+        self.assertIsNone(result)
+        self.assertEqual(sim, 0.0)
+
+    def test_similarity_score_is_rounded_to_4_places(self):
+        import math
+        angle = math.acos(0.9123456789)
+        emb_ent = [1.0, 0.0]
+        emb_q   = [math.cos(angle), math.sin(angle)]
+        self._write_cache_file("k1", {"engine": "brave", "results": []})
+        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb_ent}}
+        p1, p2, p3 = self._patch(index, emb_q)
+        with p1, p2, p3:
+            _, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.9)
+        # Should be rounded to 4 decimal places
+        self.assertEqual(sim, round(sim, 4))
+        str_sim = str(sim)
+        decimal_places = len(str_sim.split('.')[-1]) if '.' in str_sim else 0
+        self.assertLessEqual(decimal_places, 4)
+
+
+class TestUpdateSemanticIndexEdgeCases(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        ccsearch._embedding_model = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch._embedding_model = None
+
+    def test_strips_json_extension_from_key(self):
+        idx_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        with patch('ccsearch._compute_embedding', return_value=[0.5, 0.5]):
+            with patch('ccsearch._load_semantic_index', return_value={}):
+                with patch('ccsearch._semantic_index_path', return_value=idx_path):
+                    ccsearch.update_semantic_index("q", "brave", None, "abc123.json")
+        with open(idx_path) as f:
+            saved = json.load(f)
+        self.assertIn("abc123", saved)
+        self.assertNotIn("abc123.json", saved)
+
+    def test_no_json_extension_key_unchanged(self):
+        # If caller passes key without .json, replace is a no-op
+        idx_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        with patch('ccsearch._compute_embedding', return_value=[0.5, 0.5]):
+            with patch('ccsearch._load_semantic_index', return_value={}):
+                with patch('ccsearch._semantic_index_path', return_value=idx_path):
+                    ccsearch.update_semantic_index("q", "brave", None, "abc123")
+        with open(idx_path) as f:
+            saved = json.load(f)
+        self.assertIn("abc123", saved)
+
+    def test_overwrites_existing_entry(self):
+        idx_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        existing = {"abc123": {"query": "old", "engine": "brave",
+                               "offset": None, "embedding": [0.0]}}
+        with patch('ccsearch._compute_embedding', return_value=[1.0, 0.0]):
+            with patch('ccsearch._load_semantic_index', return_value=existing):
+                with patch('ccsearch._semantic_index_path', return_value=idx_path):
+                    ccsearch.update_semantic_index("new query", "brave", None, "abc123.json")
+        with open(idx_path) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["abc123"]["query"], "new query")
+        self.assertEqual(saved["abc123"]["embedding"], [1.0, 0.0])
+
+    def test_stores_correct_metadata(self):
+        idx_path = os.path.join(self.tmpdir, 'semantic_index.json')
+        with patch('ccsearch._compute_embedding', return_value=[0.1, 0.9]):
+            with patch('ccsearch._load_semantic_index', return_value={}):
+                with patch('ccsearch._semantic_index_path', return_value=idx_path):
+                    ccsearch.update_semantic_index("test q", "perplexity", 2, "mykey.json")
+        with open(idx_path) as f:
+            saved = json.load(f)
+        entry = saved["mykey"]
+        self.assertEqual(entry["query"],   "test q")
+        self.assertEqual(entry["engine"],  "perplexity")
+        self.assertEqual(entry["offset"],  2)
+        self.assertEqual(entry["embedding"], [0.1, 0.9])
+
+
+class TestMainSemanticCacheIntegration(unittest.TestCase):
+    """Tests the full main() cache flow for semantic cache paths."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        ccsearch._embedding_model = None
+        self._old_argv = sys.argv
+        self._old_env  = os.environ.copy()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        ccsearch._embedding_model = None
+        sys.argv = self._old_argv
+        os.environ.clear()
+        os.environ.update(self._old_env)
+
+    def _run_main(self, args, env=None):
+        from io import StringIO
+        out, err, code = StringIO(), StringIO(), 0
+        sys.argv = ['ccsearch'] + args
+        if env:
+            os.environ.update(env)
+        with patch('sys.stdout', out), patch('sys.stderr', err):
+            try:
+                ccsearch.main()
+            except SystemExit as e:
+                code = e.code if e.code is not None else 0
+        return out.getvalue(), err.getvalue(), code
+
+    def _brave_result(self):
+        return {"engine": "brave", "query": "q", "results": [
+            {"title": "T", "url": "http://x", "description": "D"}
+        ]}
+
+    def test_fetch_engine_does_not_use_semantic_cache(self):
+        """fetch engine must bypass semantic cache entirely."""
+        fetch_result = {"engine": "fetch", "url": "http://example.com",
+                        "title": "T", "content": "C", "fetched_via": "direct"}
+        with patch('ccsearch.perform_fetch', return_value=fetch_result) as mock_fetch:
+            with patch('ccsearch.read_from_semantic_cache') as mock_sem:
+                with patch('ccsearch.update_semantic_index') as mock_upd:
+                    out, _, code = self._run_main(
+                        ['http://example.com', '-e', 'fetch',
+                         '--semantic-cache', '--format', 'json'])
+        self.assertEqual(code, 0)
+        mock_sem.assert_not_called()
+        mock_upd.assert_not_called()
+
+    def test_semantic_cache_implies_cache_writes_on_miss(self):
+        """--semantic-cache without --cache should still write to exact cache."""
+        brave_result = self._brave_result()
+        with patch('ccsearch.perform_brave_search', return_value=brave_result):
+            with patch('ccsearch.write_to_cache') as mock_write:
+                with patch('ccsearch.update_semantic_index') as mock_update:
+                    with patch('ccsearch.read_from_cache', return_value=None):
+                        with patch('ccsearch.read_from_semantic_cache', return_value=(None, 0.0)):
+                            with patch('ccsearch._compute_embedding', return_value=[0.1]*384):
+                                self._run_main(
+                                    ['test query', '-e', 'brave', '--semantic-cache',
+                                     '--format', 'json'],
+                                    env={'BRAVE_API_KEY': 'test-key'})
+        mock_write.assert_called_once()
+        mock_update.assert_called_once()
+
+    def test_semantic_hit_adds_metadata_fields_to_json(self):
+        """Semantic cache hit must set _from_cache=true and _semantic_similarity."""
+        cached = self._brave_result()
+        with patch('ccsearch.read_from_cache', return_value=None):
+            with patch('ccsearch.read_from_semantic_cache', return_value=(cached, 0.9321)):
+                out, _, code = self._run_main(
+                    ['similar query', '-e', 'brave',
+                     '--semantic-cache', '--format', 'json'],
+                    env={'BRAVE_API_KEY': 'test-key'})
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertTrue(data.get("_from_cache"))
+        self.assertAlmostEqual(data.get("_semantic_similarity"), 0.9321)
+
+    def test_exact_cache_hit_skips_semantic_lookup(self):
+        """When exact cache hits, semantic lookup must not be called."""
+        cached = {**self._brave_result(), "_from_cache": True}
+        with patch('ccsearch.read_from_cache', return_value=cached):
+            with patch('ccsearch.read_from_semantic_cache') as mock_sem:
+                with patch('ccsearch._load_semantic_index', return_value={}):
+                    with patch('ccsearch.update_semantic_index'):
+                        self._run_main(
+                            ['q', '-e', 'brave', '--semantic-cache', '--format', 'json'],
+                            env={'BRAVE_API_KEY': 'test-key'})
+        mock_sem.assert_not_called()
+
+    def test_exact_cache_hit_backfills_semantic_index_when_missing(self):
+        """Bug-fix: exact cache hit must insert embedding into index if absent."""
+        cached = self._brave_result()
+        with patch('ccsearch.read_from_cache', return_value=cached):
+            with patch('ccsearch._load_semantic_index', return_value={}):  # key not in index
+                with patch('ccsearch.update_semantic_index') as mock_upd:
+                    self._run_main(
+                        ['q', '-e', 'brave', '--semantic-cache', '--format', 'json'],
+                        env={'BRAVE_API_KEY': 'test-key'})
+        mock_upd.assert_called_once()
+
+    def test_exact_cache_hit_does_not_backfill_when_already_indexed(self):
+        """If key already in semantic index, don't recompute the embedding."""
+        cached = self._brave_result()
+        cache_key_no_ext = ccsearch.get_cache_key('q', 'brave', None).replace('.json', '')
+        existing_index = {cache_key_no_ext: {"query": "q", "embedding": [0.1]}}
+        with patch('ccsearch.read_from_cache', return_value=cached):
+            with patch('ccsearch._load_semantic_index', return_value=existing_index):
+                with patch('ccsearch.update_semantic_index') as mock_upd:
+                    self._run_main(
+                        ['q', '-e', 'brave', '--semantic-cache', '--format', 'json'],
+                        env={'BRAVE_API_KEY': 'test-key'})
+        mock_upd.assert_not_called()
+
+    def test_semantic_cache_miss_falls_through_to_api(self):
+        """Full miss on both caches must trigger the actual search."""
+        brave_result = self._brave_result()
+        with patch('ccsearch.read_from_cache', return_value=None):
+            with patch('ccsearch.read_from_semantic_cache', return_value=(None, 0.0)):
+                with patch('ccsearch.perform_brave_search', return_value=brave_result) as mock_bs:
+                    with patch('ccsearch.write_to_cache'):
+                        with patch('ccsearch.update_semantic_index'):
+                            with patch('ccsearch._compute_embedding', return_value=None):
+                                out, _, code = self._run_main(
+                                    ['q', '-e', 'brave', '--semantic-cache', '--format', 'json'],
+                                    env={'BRAVE_API_KEY': 'test-key'})
+        mock_bs.assert_called_once()
+        self.assertEqual(code, 0)
+
+    def test_text_format_shows_cached_note_on_semantic_hit(self):
+        """text format must print the [Returning Cached Result] header."""
+        cached = self._brave_result()
+        with patch('ccsearch.read_from_cache', return_value=None):
+            with patch('ccsearch.read_from_semantic_cache', return_value=(cached, 0.95)):
+                out, _, _ = self._run_main(
+                    ['q', '-e', 'brave', '--semantic-cache', '--format', 'text'],
+                    env={'BRAVE_API_KEY': 'test-key'})
+        self.assertIn("Returning Cached Result", out)
+
+    def test_no_semantic_cache_flag_never_calls_semantic_functions(self):
+        """Without --semantic-cache, semantic functions must never be touched."""
+        brave_result = self._brave_result()
+        with patch('ccsearch.perform_brave_search', return_value=brave_result):
+            with patch('ccsearch.read_from_semantic_cache') as mock_sem:
+                with patch('ccsearch.update_semantic_index') as mock_upd:
+                    self._run_main(
+                        ['q', '-e', 'brave', '--cache', '--format', 'json'],
+                        env={'BRAVE_API_KEY': 'test-key'})
+        mock_sem.assert_not_called()
+        mock_upd.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

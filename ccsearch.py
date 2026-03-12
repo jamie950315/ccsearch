@@ -73,6 +73,112 @@ def write_to_cache(query, engine, offset, result):
     except Exception as e:
         sys.stderr.write(f"Warning: Failed to write to cache: {e}\n")
 
+# ---------------------------------------------------------------------------
+# Semantic cache (optional — requires fastembed)
+# ---------------------------------------------------------------------------
+_embedding_model = None
+
+def _get_embedding_model():
+    """Lazily load the fastembed TextEmbedding model. Returns None if unavailable."""
+    global _embedding_model
+    if _embedding_model is None:
+        try:
+            from fastembed import TextEmbedding
+            sys.stderr.write("[ccsearch] Loading embedding model (BAAI/bge-small-en-v1.5)...\n")
+            _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        except ImportError:
+            sys.stderr.write("Warning: fastembed not installed — semantic cache disabled. Run: pip install fastembed\n")
+            _embedding_model = False  # sentinel: don't retry import
+    return _embedding_model if _embedding_model is not False else None
+
+def _compute_embedding(text):
+    """Return embedding as list[float], or None if fastembed unavailable."""
+    model = _get_embedding_model()
+    if model is None:
+        return None
+    try:
+        return next(model.embed([text])).tolist()
+    except Exception as e:
+        sys.stderr.write(f"Warning: embedding failed: {e}\n")
+        return None
+
+def _cosine_sim(a, b):
+    """Pure-Python cosine similarity between two equal-length float lists."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+def _semantic_index_path():
+    return os.path.join(get_cache_dir(), "semantic_index.json")
+
+def _load_semantic_index():
+    path = _semantic_index_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_semantic_index(index):
+    try:
+        with open(_semantic_index_path(), "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False)
+    except Exception as e:
+        sys.stderr.write(f"Warning: could not save semantic index: {e}\n")
+
+def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
+    """Return (cached_result, similarity) or (None, 0.0) when no semantic match found."""
+    index = _load_semantic_index()
+    if not index:
+        return None, 0.0
+
+    q_emb = _compute_embedding(query)
+    if q_emb is None:
+        return None, 0.0
+
+    best_key, best_sim = None, -1.0
+    cache_dir = get_cache_dir()
+    for key, meta in index.items():
+        if meta.get("engine") != engine or meta.get("offset") != offset:
+            continue
+        cache_file = os.path.join(cache_dir, key + ".json")
+        if not os.path.exists(cache_file):
+            continue
+        if time.time() - os.path.getmtime(cache_file) > ttl_minutes * 60:
+            continue
+        emb = meta.get("embedding")
+        if not emb:
+            continue
+        sim = _cosine_sim(q_emb, emb)
+        if sim > best_sim:
+            best_sim, best_key = sim, key
+
+    if best_key and best_sim >= threshold:
+        cache_file = os.path.join(cache_dir, best_key + ".json")
+        try:
+            with open(cache_file, encoding="utf-8") as f:
+                result = json.load(f)
+            return result, round(best_sim, 4)
+        except Exception:
+            pass
+
+    return None, 0.0
+
+def update_semantic_index(query, engine, offset, cache_key_filename):
+    """Compute and store the query embedding in the semantic index."""
+    emb = _compute_embedding(query)
+    if emb is None:
+        return
+    key = cache_key_filename.replace(".json", "")
+    index = _load_semantic_index()
+    index[key] = {"query": query, "engine": engine, "offset": offset, "embedding": emb}
+    _save_semantic_index(index)
+
+# ---------------------------------------------------------------------------
+
 def retry_request(method, url, max_retries, **kwargs):
     """Request wrapper with a simple Exponential Backoff mechanism"""
     for attempt in range(max_retries + 1):
@@ -316,6 +422,8 @@ def main():
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
     parser.add_argument("--cache", action="store_true", help="Enable results caching")
     parser.add_argument("--cache-ttl", type=int, default=10, help="Cache Time-To-Live in minutes (default: 10)")
+    parser.add_argument("--semantic-cache", action="store_true", help="Enable semantic similarity cache via fastembed (implies --cache)")
+    parser.add_argument("--semantic-threshold", type=float, default=0.9, help="Cosine similarity threshold for semantic cache (default: 0.9)")
     parser.add_argument("--flaresolverr", action="store_true", help="Force FlareSolverr mode for fetch engine (overrides config flaresolverr_mode to 'always')")
 
     args = parser.parse_args()
@@ -323,10 +431,32 @@ def main():
 
     try:
         result = None
-        if args.cache:
+        use_cache = args.cache or args.semantic_cache
+        # Semantic cache only makes sense for text-query engines, not URL fetch
+        use_semantic = args.semantic_cache and args.engine != "fetch"
+
+        # 1. Try exact cache hit
+        if use_cache:
             result = read_from_cache(args.query, args.engine, args.offset, args.cache_ttl)
             if result:
                 result["_from_cache"] = True
+                # Ensure the semantic index has an entry even for exact-cache hits,
+                # so future paraphrased queries can still find it semantically.
+                if use_semantic:
+                    cache_key = get_cache_key(args.query, args.engine, args.offset)
+                    index = _load_semantic_index()
+                    key = cache_key.replace(".json", "")
+                    if key not in index:
+                        update_semantic_index(args.query, args.engine, args.offset, cache_key)
+
+        # 2. Try semantic cache hit (on exact miss)
+        if not result and use_semantic:
+            result, sim = read_from_semantic_cache(
+                args.query, args.engine, args.offset, args.cache_ttl, args.semantic_threshold
+            )
+            if result:
+                result["_from_cache"] = True
+                result["_semantic_similarity"] = sim
 
         if not result:
             if args.engine == "brave":
@@ -359,10 +489,13 @@ def main():
                     config.set('Fetch', 'flaresolverr_mode', 'always')
                     if not config.get('Fetch', 'flaresolverr_url', fallback='').strip():
                         sys.stderr.write("WARNING: --flaresolverr flag set but no flaresolverr_url configured in config.ini.\n")
-                result=perform_fetch(args.query, config)
+                result = perform_fetch(args.query, config)
 
-            if args.cache:
+            if use_cache:
+                cache_key = get_cache_key(args.query, args.engine, args.offset)
                 write_to_cache(args.query, args.engine, args.offset, result)
+                if use_semantic:
+                    update_semantic_index(args.query, args.engine, args.offset, cache_key)
 
         if args.format == "json":
             print(json.dumps(result, indent=2, ensure_ascii=False))
