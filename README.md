@@ -3,10 +3,11 @@
 A CLI Web Search utility designed to be easily used by Large Language Models (LLMs) like Claude Code, as well as human users. It supports structured outputs (`JSON`) for agents and readable outputs (`text`) for humans.
 
 ## Supported Engines
-1. **Brave Search** (via Brave Data for Search API): Best for getting a list of fast, accurate links and snippets. Supports pagination (`--offset`), safsearch, and time-based filtering.
+1. **Brave Search** (via Brave Search API): Best for getting a list of fast, accurate links and snippets. Supports pagination (`--offset`), safesearch, and time-based filtering.
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
-3. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-4. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
+3. **LLM Context** (via Brave LLM Context API): Returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. Extracts text, tables, code blocks, and structured data from multiple sources in a single API call — no scraping needed. Ideal for RAG pipelines and AI agent grounding.
+4. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
+5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
 
 ## Requirements & Setup
 
@@ -31,7 +32,8 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
    ```
    *(Ensure `~/.local/bin` is in your environment's PATH so you can just run `ccsearch` from anywhere)*
 5. Set your Environment Variables:
-   - For Brave: `export BRAVE_API_KEY="your_brave_api_key"`
+   - For Brave Web Search: `export BRAVE_API_KEY="your_brave_api_key"`
+   - For LLM Context: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"` *(falls back to `BRAVE_API_KEY` if not set; note that the LLM Context API requires a key from Brave's Search plan, which is separate from the Pro plan)*
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
 ## Usage for Humans
@@ -45,6 +47,9 @@ ccsearch "latest React documentation" -e brave --format text --offset 1
 
 # Perplexity Synthesis (Text Output)
 ccsearch "What is the difference between Vue 3 and React 18?" -e perplexity --format text
+
+# LLM Context (Pre-extracted smart chunks for grounding)
+ccsearch "React hooks best practices" -e llm-context --format text
 
 # Both Engines Concurrently (Merged Text Output)
 ccsearch "What is the new React compiler?" -e both --format text
@@ -102,7 +107,7 @@ ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshol
 5. `--semantic-cache` implies `--cache` — no need to pass both flags
 
 **Notes:**
-- Only applies to `brave`, `perplexity`, and `both` engines. The `fetch` engine always uses exact URL matching.
+- Applies to `brave`, `perplexity`, `both`, and `llm-context` engines. The `fetch` engine always uses exact URL matching.
 - If `fastembed` is not installed, a warning is printed and the tool continues without semantic matching.
 - The same `--cache-ttl` applies to both caches.
 
@@ -166,6 +171,14 @@ You can deeply customize tool behavior by adjusting `config.ini`:
 - **`max_tokens`**: Hard limit on generation length to save costs.
 - **`max_retries`**: Auto-retry count for network anomalies.
 
+### `[LLMContext]`
+- **`count`**: Number of search results to consider for context extraction, 1-50 (Default: `20`).
+- **`maximum_number_of_tokens`**: Approximate max tokens in the context response, 1024-32768 (Default: `8192`). Lower for simple factual queries (~2048), higher for deep research (~16384).
+- **`maximum_number_of_urls`**: Maximum URLs in the response, 1-50 (Default: `20`).
+- **`context_threshold_mode`**: Relevance filtering: `strict` (fewer, more precise), `balanced` (default), `lenient` (more results), or `disabled` (no filtering).
+- **`freshness`**: Same time-based filtering as Brave (`pd`, `pw`, `pm`, `py`).
+- **`max_retries`**: Auto-retry count for network anomalies.
+
 ### `[Fetch]`
 - **`flaresolverr_url`**: FlareSolverr endpoint URL (e.g., `http://localhost:8191/v1`). Leave blank to disable.
 - **`flaresolverr_timeout`**: Max time in milliseconds for FlareSolverr to solve a challenge (Default: `60000`).
@@ -193,6 +206,12 @@ ccsearch "anthropic claude 3.5 sonnet release date" -e brave --format json
 
 *(Agent Tip: If you didn't find what you need in the first 10 results, you can fetch the next page by adding `--offset 1`)*
 
+**LLM Context Example:**
+```bash
+ccsearch "React hooks best practices" -e llm-context --format json
+```
+*Use this when you need pre-extracted web content optimized for LLM grounding. Returns smart chunks (text, tables, code blocks, structured data) from multiple sources in a single call — far more token-efficient than fetching pages individually. Requires `BRAVE_SEARCH_API_KEY` (or falls back to `BRAVE_API_KEY`).*
+
 **Both Engines Example:**
 ```bash
 ccsearch "what are the architectural differences between Next.js app router and pages router" -e both --format json
@@ -218,7 +237,7 @@ ccsearch "Python asyncio event loop tutorial" -e brave --format json --semantic-
 *Use `--semantic-cache` when researching a topic across multiple queries with slightly different wording. Semantically similar queries return the cached result instantly without a new API call. Check `_from_cache` and `_semantic_similarity` in the JSON output to know when a cache hit occurred. Requires `pip install fastembed`.*
 
 ### Error Handling
-- If the command returns an error about missing `BRAVE_API_KEY` or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
+- If the command returns an error about missing `BRAVE_API_KEY`, `BRAVE_SEARCH_API_KEY`, or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
 
 ## Instructing Your AI to Use `ccsearch` (CLAUDE.md)
@@ -234,22 +253,25 @@ Copy and paste the snippet below into your `CLAUDE.md`:
 - **INSTEAD**, you MUST use the custom `ccsearch` utility CLI tool located at `~/ccsearch/ccsearch.py` (which is also globally accessible as `ccsearch`).
 - **PROACTIVE SEARCHING**: You must proactively search the web using `ccsearch` whenever the user asks about something you are unsure of, or whenever the topic involves relatively new technologies, news, or frameworks (released within the last year). Do not guess or hallucinate!
 - **ITERATIVE RESEARCH**: You are encouraged to perform multiple rounds of searches with different keywords or different engines (Brave vs Perplexity) to compile the most accurate and reliable answer.
-- **Why?** It utilizes Brave Data for Search API and OpenRouter Perplexity, providing faster, more robust results with automatic error-handling and retries.
+- **Why?** It utilizes Brave Search API (Web Search + LLM Context endpoints) and OpenRouter Perplexity, providing faster, more robust results with automatic error-handling and retries.
 - **How to Use Examples (always use `--format json` for agents):**
   1. For finding specific links, documentation, or diverse web sources:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json`
   2. For broad questions requiring a synthesized answer from the web (Use `--cache` to save time on repeated inquiries):
      `ccsearch "What are the latest breaking changes in React 19?" -e perplexity --format json --cache`
-  3. For complex research requiring BOTH an intelligent summary and raw URLs to read further:
+  3. For pre-extracted web content optimized for LLM grounding (smart chunks with structured data, code blocks, tables — no scraping needed):
+     `ccsearch "React hooks best practices" -e llm-context --format json --cache`
+     *(Preferred for RAG/grounding — returns query-relevant content from multiple sources in a single call, far more token-efficient than fetch.)*
+  4. For complex research requiring BOTH an intelligent summary and raw URLs to read further:
      `ccsearch "Next.js app router architecture" -e both --format json --cache`
-  4. **Use `--semantic-cache` when researching a topic across multiple related queries** to avoid redundant API calls — semantically similar queries reuse cached results:
+  5. **Use `--semantic-cache` when researching a topic across multiple related queries** to avoid redundant API calls — semantically similar queries reuse cached results:
      `ccsearch "React Server Components explained" -e perplexity --format json --semantic-cache --cache-ttl 60`
      *(Requires `pip install fastembed`. Check `_from_cache` and `_semantic_similarity` in the JSON output to know if a cached result was returned.)*
-  5. If you didn't find what you need via Brave, you can fetch the next page of results:
+  6. If you didn't find what you need via Brave, you can fetch the next page of results:
      `ccsearch "Next.js 14 hydration docs" -e brave --format json --offset 1`
-  6. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
+  7. **To read the FULL text of a specific URL (like a documentation page or article) when the search snippet isn't enough:**
      `ccsearch "https://react.dev/reference/react" -e fetch --format json`
-  7. **If a fetch fails due to Cloudflare protection or JS-rendered content**, force FlareSolverr:
+  8. **If a fetch fails due to Cloudflare protection or JS-rendered content**, force FlareSolverr:
      `ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr`
      *(Requires `flaresolverr_url` in `config.ini`. In `fallback` mode, Cloudflare is auto-detected — no flag needed. Check the `"fetched_via"` field in the JSON output to see which method was used.)*
 - For the full tutorial and advanced parameters (like how to configure limits or handle missing APIs), please read the README located at `~/ccsearch/README.md` FIRST before making assumptions.
