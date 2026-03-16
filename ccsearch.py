@@ -31,6 +31,14 @@ def load_config(config_file):
         'max_tokens': '1024',
         'max_retries': '2'
     }
+    config['LLMContext'] = {
+        'count': '20',
+        'maximum_number_of_tokens': '8192',
+        'maximum_number_of_urls': '20',
+        'context_threshold_mode': 'balanced',
+        'freshness': '',
+        'max_retries': '2'
+    }
     config['Fetch'] = {
         'flaresolverr_url': '',
         'flaresolverr_timeout': '60000',
@@ -307,6 +315,59 @@ def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset
         "perplexity_answer": perplexity_result.get("answer", "")
     }
 
+def perform_llm_context_search(query, api_key, config):
+    url = "https://api.search.brave.com/res/v1/llm/context"
+    headers = {
+        "Accept": "application/json",
+        "X-Subscription-Token": api_key
+    }
+
+    count = config.getint('LLMContext', 'count', fallback=20)
+    max_tokens = config.getint('LLMContext', 'maximum_number_of_tokens', fallback=8192)
+    max_urls = config.getint('LLMContext', 'maximum_number_of_urls', fallback=20)
+    threshold_mode = config.get('LLMContext', 'context_threshold_mode', fallback='balanced').lower()
+
+    params = {
+        "q": query,
+        "count": count,
+        "maximum_number_of_tokens": max_tokens,
+        "maximum_number_of_urls": max_urls,
+    }
+
+    if threshold_mode in ['strict', 'balanced', 'lenient', 'disabled']:
+        params['context_threshold_mode'] = threshold_mode
+
+    freshness = config.get('LLMContext', 'freshness', fallback='').lower()
+    if freshness in ['pd', 'pw', 'pm', 'py']:
+        params['freshness'] = freshness
+
+    # Reuse Brave rate limiting since it's the same API key / subscription
+    rps = config.getfloat('Brave', 'requests_per_second', fallback=1.0)
+    if rps > 0:
+        time.sleep(1.0 / rps)
+
+    max_retries = config.getint('LLMContext', 'max_retries', fallback=2)
+    response = retry_request('GET', url, max_retries, headers=headers, params=params, timeout=(10, 30))
+    data = response.json()
+
+    grounding = data.get("grounding", {})
+    sources = data.get("sources", {})
+
+    results = []
+    for item in grounding.get("generic", []):
+        results.append({
+            "url": item.get("url"),
+            "title": item.get("title"),
+            "snippets": item.get("snippets", [])
+        })
+
+    return {
+        "engine": "llm-context",
+        "query": query,
+        "results": results,
+        "sources": sources,
+    }
+
 FETCH_HEADERS={
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -416,7 +477,7 @@ def perform_fetch(url, config):
 def main():
     parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
     parser.add_argument("query", help="The search query, keyword, or URL (for fetch engine)")
-    parser.add_argument("-e", "--engine", choices=["brave", "perplexity", "both", "fetch"], required=True, help="Search engine to use (brave, perplexity, both, or fetch)")
+    parser.add_argument("-e", "--engine", choices=["brave", "perplexity", "both", "fetch", "llm-context"], required=True, help="Search engine to use (brave, perplexity, both, fetch, or llm-context)")
     parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
     parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
@@ -481,6 +542,13 @@ def main():
                     sys.exit(1)
                 result = perform_both_search(args.query, brave_api_key, perplexity_api_key, config, offset=args.offset)
 
+            elif args.engine == "llm-context":
+                api_key = os.environ.get("BRAVE_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
+                if not api_key:
+                    sys.stderr.write("ERROR: BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY) environment variable not found.\nPlease set it using: export BRAVE_SEARCH_API_KEY='your_key'\nNote: The LLM Context API requires a key from the Brave Search plan, which is separate from the Pro plan.\n")
+                    sys.exit(1)
+                result = perform_llm_context_search(args.query, api_key, config)
+
             elif args.engine == "fetch":
                 if not args.query.startswith("http"):
                     sys.stderr.write("ERROR: For 'fetch' engine, the query must be a valid HTTP or HTTPS URL.\n")
@@ -516,6 +584,14 @@ def main():
                 print(f"\n\n--- Source Reference Links (Brave) ---\n")
                 for idx, res in enumerate(result["brave_results"], 1):
                     print(f"{idx}. {res['title']}\n   URL: {res['url']}\n   {res['description']}\n")
+            elif args.engine == "llm-context":
+                print(f"LLM Context Results for: {args.query}\n")
+                for idx, res in enumerate(result["results"], 1):
+                    print(f"{idx}. {res['title']}")
+                    print(f"   URL: {res['url']}")
+                    for snippet in res.get("snippets", []):
+                        print(f"   > {snippet}")
+                    print()
             elif args.engine == "fetch":
                 if "error" in result:
                     print(f"Error fetching URL: {result['error']}\n")

@@ -43,6 +43,34 @@ max_tokens = 1024
 # Uses exponential backoff.
 max_retries = 2
 
+[LLMContext]
+# Number of search results to consider for context extraction (1-50).
+count = 20
+
+# Approximate maximum tokens in the context response (1024-32768).
+# Lower for simple factual queries, higher for complex research.
+#   Simple factual:  2048  (e.g. "What year was Python created?")
+#   Standard:        8192  (e.g. "React hooks best practices")
+#   Deep research:  16384  (e.g. "Compare AI frameworks for production")
+maximum_number_of_tokens = 8192
+
+# Maximum URLs in the response (1-50).
+maximum_number_of_urls = 20
+
+# Relevance threshold for including content.
+# Allowed values: strict, balanced, lenient, disabled
+#   strict   = fewer but more precise results
+#   balanced = default, good coverage vs relevance
+#   lenient  = more results, may include less relevant content
+#   disabled = no filtering, return all extracted content
+context_threshold_mode = balanced
+
+# Time-based filtering (same values as Brave: pd, pw, pm, py, or blank).
+freshness =
+
+# Number of times to auto-retry on timeout or network error.
+max_retries = 2
+
 [Fetch]
 # FlareSolverr proxy URL for bypassing Cloudflare and rendering JS-heavy pages.
 # Leave blank to disable the fallback (only bare HTTP requests will be used).

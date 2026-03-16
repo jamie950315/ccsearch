@@ -29,6 +29,10 @@ def _make_config(**fetch_overrides):
                        'count': '10', 'safesearch': 'moderate', 'freshness': ''}
     config['Perplexity'] = {'model': 'perplexity/sonar', 'citations': 'true',
                             'temperature': '0.1', 'max_tokens': '1024', 'max_retries': '2'}
+    config['LLMContext'] = {'count': '20', 'maximum_number_of_tokens': '8192',
+                            'maximum_number_of_urls': '20',
+                            'context_threshold_mode': 'balanced',
+                            'freshness': '', 'max_retries': '2'}
     config['Fetch'] = {
         'flaresolverr_url': fetch_overrides.get('flaresolverr_url', ''),
         'flaresolverr_timeout': str(fetch_overrides.get('flaresolverr_timeout', 60000)),
@@ -81,10 +85,20 @@ class TestLoadConfig(unittest.TestCase):
         # Default preserved
         self.assertEqual(config.get('Fetch', 'flaresolverr_mode'), 'fallback')
 
-    def test_all_three_sections_exist(self):
+    def test_llm_context_defaults(self):
+        config = ccsearch.load_config('/nonexistent/path/config.ini')
+        self.assertEqual(config.get('LLMContext', 'count'), '20')
+        self.assertEqual(config.get('LLMContext', 'maximum_number_of_tokens'), '8192')
+        self.assertEqual(config.get('LLMContext', 'maximum_number_of_urls'), '20')
+        self.assertEqual(config.get('LLMContext', 'context_threshold_mode'), 'balanced')
+        self.assertEqual(config.get('LLMContext', 'freshness'), '')
+        self.assertEqual(config.get('LLMContext', 'max_retries'), '2')
+
+    def test_all_sections_exist(self):
         config = ccsearch.load_config('/nonexistent')
         self.assertTrue(config.has_section('Brave'))
         self.assertTrue(config.has_section('Perplexity'))
+        self.assertTrue(config.has_section('LLMContext'))
         self.assertTrue(config.has_section('Fetch'))
 
 
@@ -521,6 +535,215 @@ class TestPerformBothSearch(unittest.TestCase):
         mock_pplx.return_value = {"engine": "perplexity", "answer": ""}
         ccsearch.perform_both_search("q", "bk", "pk", _make_config(), offset=3)
         mock_brave.assert_called_once_with("q", "bk", unittest.mock.ANY, 3)
+
+
+# ===========================================================================
+# 6b. perform_llm_context_search
+# ===========================================================================
+class TestPerformLLMContextSearch(unittest.TestCase):
+
+    def _default_config(self):
+        return _make_config()
+
+    def _sample_api_response(self):
+        return {
+            "grounding": {
+                "generic": [
+                    {
+                        "url": "https://example.com/page1",
+                        "title": "Page One",
+                        "snippets": ["Snippet 1a", "Snippet 1b"]
+                    },
+                    {
+                        "url": "https://example.com/page2",
+                        "title": "Page Two",
+                        "snippets": ["Snippet 2a"]
+                    }
+                ],
+                "map": []
+            },
+            "sources": {
+                "https://example.com/page1": {
+                    "title": "Page One",
+                    "hostname": "example.com",
+                    "age": ["Monday, January 15, 2024", "2024-01-15", "380 days ago"]
+                },
+                "https://example.com/page2": {
+                    "title": "Page Two",
+                    "hostname": "example.com",
+                    "age": None
+                }
+            }
+        }
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_basic_search(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data=self._sample_api_response())
+        result = ccsearch.perform_llm_context_search("test query", "key123", self._default_config())
+        self.assertEqual(result["engine"], "llm-context")
+        self.assertEqual(result["query"], "test query")
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(result["results"][0]["title"], "Page One")
+        self.assertEqual(result["results"][0]["url"], "https://example.com/page1")
+        self.assertEqual(result["results"][0]["snippets"], ["Snippet 1a", "Snippet 1b"])
+        self.assertIn("https://example.com/page1", result["sources"])
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_empty_grounding(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["sources"], {})
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_missing_grounding_key(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={})
+        result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["sources"], {})
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_api_key_in_header(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        ccsearch.perform_llm_context_search("test", "MY_API_KEY", self._default_config())
+        headers = mock_req.call_args.kwargs['headers']
+        self.assertEqual(headers['X-Subscription-Token'], 'MY_API_KEY')
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_correct_endpoint(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        call_args = mock_req.call_args
+        self.assertEqual(call_args.args[1], "https://api.search.brave.com/res/v1/llm/context")
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_default_params(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        params = mock_req.call_args.kwargs['params']
+        self.assertEqual(params['q'], 'test')
+        self.assertEqual(params['count'], 20)
+        self.assertEqual(params['maximum_number_of_tokens'], 8192)
+        self.assertEqual(params['maximum_number_of_urls'], 20)
+        self.assertEqual(params['context_threshold_mode'], 'balanced')
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_custom_count_config(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'count', '50')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['count'], 50)
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_custom_max_tokens_config(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'maximum_number_of_tokens', '16384')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['maximum_number_of_tokens'], 16384)
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_custom_max_urls_config(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'maximum_number_of_urls', '5')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['maximum_number_of_urls'], 5)
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_threshold_mode_strict(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'context_threshold_mode', 'strict')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['context_threshold_mode'], 'strict')
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_threshold_mode_disabled(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'context_threshold_mode', 'disabled')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['context_threshold_mode'], 'disabled')
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_invalid_threshold_mode_not_in_params(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'context_threshold_mode', 'INVALID')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertNotIn('context_threshold_mode', mock_req.call_args.kwargs['params'])
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_freshness_config(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'freshness', 'pw')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.kwargs['params']['freshness'], 'pw')
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_freshness_empty_not_in_params(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'freshness', '')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertNotIn('freshness', mock_req.call_args.kwargs['params'])
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_rate_limiting_uses_brave_rps(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('Brave', 'requests_per_second', '2')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        mock_sleep.assert_called_once_with(0.5)
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_missing_snippets_defaults_to_empty(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={
+            "grounding": {"generic": [{"url": "http://x", "title": "T"}]},
+            "sources": {}
+        })
+        result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        self.assertEqual(result["results"][0]["snippets"], [])
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_missing_fields_in_generic(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={
+            "grounding": {"generic": [{}]},
+            "sources": {}
+        })
+        result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
+        self.assertIsNone(result["results"][0]["url"])
+        self.assertIsNone(result["results"][0]["title"])
+        self.assertEqual(result["results"][0]["snippets"], [])
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.retry_request')
+    def test_max_retries_config(self, mock_req, mock_sleep):
+        mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
+        config = self._default_config()
+        config.set('LLMContext', 'max_retries', '5')
+        ccsearch.perform_llm_context_search("test", "key", config)
+        self.assertEqual(mock_req.call_args.args[2], 5)
 
 
 # ===========================================================================
@@ -1090,6 +1313,92 @@ class TestMainCLI(unittest.TestCase):
             out, err, code = self._run_main(['http://x', '-e', 'fetch', '--format', 'json', '--flaresolverr'])
         self.assertIn("WARNING", err)
         self.assertIn("no flaresolverr_url configured", err)
+
+    # ---- LLM Context engine ----
+
+    def test_llm_context_missing_api_key(self):
+        env_backup_s = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
+        env_backup_b = os.environ.pop('BRAVE_API_KEY', None)
+        try:
+            out, err, code = self._run_main(['test', '-e', 'llm-context'])
+            self.assertEqual(code, 1)
+            self.assertIn("BRAVE_SEARCH_API_KEY", err)
+        finally:
+            if env_backup_s:
+                os.environ['BRAVE_SEARCH_API_KEY'] = env_backup_s
+            if env_backup_b:
+                os.environ['BRAVE_API_KEY'] = env_backup_b
+
+    @patch('ccsearch.perform_llm_context_search')
+    def test_llm_context_prefers_search_key(self, mock_lc):
+        """BRAVE_SEARCH_API_KEY takes priority over BRAVE_API_KEY."""
+        mock_lc.return_value = {
+            "engine": "llm-context", "query": "test",
+            "results": [], "sources": {}
+        }
+        out, err, code = self._run_main(
+            ['test', '-e', 'llm-context', '--format', 'json'],
+            env={'BRAVE_SEARCH_API_KEY': 'search_key', 'BRAVE_API_KEY': 'pro_key'})
+        self.assertEqual(code, 0)
+        mock_lc.assert_called_once_with("test", "search_key", unittest.mock.ANY)
+
+    @patch('ccsearch.perform_llm_context_search')
+    def test_llm_context_falls_back_to_brave_key(self, mock_lc):
+        """Falls back to BRAVE_API_KEY when BRAVE_SEARCH_API_KEY is not set."""
+        env_backup = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
+        try:
+            mock_lc.return_value = {
+                "engine": "llm-context", "query": "test",
+                "results": [], "sources": {}
+            }
+            out, err, code = self._run_main(
+                ['test', '-e', 'llm-context', '--format', 'json'],
+                env={'BRAVE_API_KEY': 'fallback_key'})
+            self.assertEqual(code, 0)
+            mock_lc.assert_called_once_with("test", "fallback_key", unittest.mock.ANY)
+        finally:
+            if env_backup:
+                os.environ['BRAVE_SEARCH_API_KEY'] = env_backup
+
+    @patch('ccsearch.perform_llm_context_search')
+    def test_llm_context_json_output(self, mock_lc):
+        mock_lc.return_value = {
+            "engine": "llm-context", "query": "test",
+            "results": [{"url": "http://a", "title": "T", "snippets": ["S1"]}],
+            "sources": {"http://a": {"title": "T", "hostname": "a", "age": None}}
+        }
+        out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'json'],
+                                         env={'BRAVE_API_KEY': 'k'})
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["engine"], "llm-context")
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["snippets"], ["S1"])
+
+    @patch('ccsearch.perform_llm_context_search')
+    def test_llm_context_text_output(self, mock_lc):
+        mock_lc.return_value = {
+            "engine": "llm-context", "query": "test",
+            "results": [{"url": "http://a", "title": "Title Here", "snippets": ["Snippet content"]}],
+            "sources": {}
+        }
+        out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'text'],
+                                         env={'BRAVE_API_KEY': 'k'})
+        self.assertEqual(code, 0)
+        self.assertIn("LLM Context Results for: test", out)
+        self.assertIn("Title Here", out)
+        self.assertIn("Snippet content", out)
+
+    @patch('ccsearch.perform_llm_context_search')
+    def test_llm_context_text_empty_results(self, mock_lc):
+        mock_lc.return_value = {
+            "engine": "llm-context", "query": "test",
+            "results": [], "sources": {}
+        }
+        out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'text'],
+                                         env={'BRAVE_API_KEY': 'k'})
+        self.assertEqual(code, 0)
+        self.assertIn("LLM Context Results for: test", out)
 
     # ---- Brave engine ----
 
@@ -2046,6 +2355,43 @@ class TestMainSemanticCacheIntegration(unittest.TestCase):
                         env={'BRAVE_API_KEY': 'test-key'})
         mock_sem.assert_not_called()
         mock_upd.assert_not_called()
+
+    def test_llm_context_semantic_cache_works(self):
+        """llm-context engine should support semantic cache."""
+        llm_result = {
+            "engine": "llm-context", "query": "q",
+            "results": [{"url": "http://x", "title": "T", "snippets": ["S"]}],
+            "sources": {}
+        }
+        with patch('ccsearch.perform_llm_context_search', return_value=llm_result):
+            with patch('ccsearch.write_to_cache') as mock_write:
+                with patch('ccsearch.update_semantic_index') as mock_update:
+                    with patch('ccsearch.read_from_cache', return_value=None):
+                        with patch('ccsearch.read_from_semantic_cache', return_value=(None, 0.0)):
+                            with patch('ccsearch._compute_embedding', return_value=[0.1]*384):
+                                self._run_main(
+                                    ['test query', '-e', 'llm-context', '--semantic-cache',
+                                     '--format', 'json'],
+                                    env={'BRAVE_API_KEY': 'test-key'})
+        mock_write.assert_called_once()
+        mock_update.assert_called_once()
+
+    def test_llm_context_cache_hit(self):
+        """llm-context engine should return from cache when hit."""
+        cached = {
+            "engine": "llm-context", "query": "q",
+            "results": [{"url": "http://x", "title": "Cached", "snippets": ["S"]}],
+            "sources": {}
+        }
+        with patch('ccsearch.read_from_cache', return_value=cached):
+            with patch('ccsearch.perform_llm_context_search') as mock_lc:
+                out, _, code = self._run_main(
+                    ['q', '-e', 'llm-context', '--cache', '--format', 'json'],
+                    env={'BRAVE_API_KEY': 'test-key'})
+        mock_lc.assert_not_called()
+        data = json.loads(out)
+        self.assertTrue(data.get("_from_cache"))
+        self.assertEqual(data["results"][0]["title"], "Cached")
 
 
 if __name__ == '__main__':
