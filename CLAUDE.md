@@ -25,3 +25,12 @@ The script `ccsearch.py` handles CLI parsing through `argparse` and loads defaul
 The `llm-context` engine calls Brave's LLM Context API (`/res/v1/llm/context`), which returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. It shares the same `BRAVE_API_KEY` and rate limiting as the `brave` engine. Configuration lives in the `[LLMContext]` section of `config.ini`.
 
 The `fetch` engine uses a layered approach: `_simple_fetch` (bare `requests.get`) → Cloudflare detection (`_detect_cloudflare`) → optional `_flaresolverr_fetch` fallback. The orchestrator `perform_fetch` reads `[Fetch]` config to decide the execution strategy (`fallback`, `always`, or `never`). FlareSolverr communication is a simple `requests.post()` to its HTTP API — no extra dependencies required.
+
+## HTTP API Server
+`api_server.py` is a Flask-based HTTP API that exposes all ccsearch engines over the network. It runs on port 8888 (configurable via `CCSEARCH_PORT` env var) behind a Cloudflare Tunnel at `ccsearch.0ruka.dev`.
+
+- **Authentication**: All endpoints except `/health` require an `X-API-Key` header. The key is loaded from the `CCSEARCH_API_KEY` env var or the `.api_key` file (auto-generated on first run).
+- **Endpoints**: `POST /search` (main search), `GET /engines` (list engines), `GET /health` (health check).
+- **Deployment**: Runs as a systemd service (`ccsearch-api.service`) with `Restart=always` for automatic recovery.
+- Start/stop: `sudo systemctl start|stop|restart ccsearch-api`
+- Logs: `journalctl -u ccsearch-api -f`
