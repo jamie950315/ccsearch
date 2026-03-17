@@ -121,6 +121,97 @@ ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshol
 
 Semantic cache delivers ~**73% faster** responses vs. cold API calls for similar queries.
 
+## HTTP API Server
+
+ccsearch can also be accessed remotely via the built-in HTTP API server (`api_server.py`), allowing other LLMs and services to use ccsearch over the network.
+
+### Quick Start
+
+```bash
+# Start the server (default port 8888)
+python3 api_server.py
+
+# Or via systemd (production)
+sudo systemctl start ccsearch-api
+```
+
+### Authentication
+
+All endpoints except `/health` require an `X-API-Key` header. The API key is resolved in this order:
+1. `CCSEARCH_API_KEY` environment variable
+2. `.api_key` file in the project directory (auto-generated on first run with `0600` permissions)
+
+### Endpoints
+
+#### `GET /health`
+Health check (no auth required).
+```bash
+curl https://ccsearch.0ruka.dev/health
+# {"status": "ok", "service": "ccsearch-api"}
+```
+
+#### `POST /search`
+Main search endpoint. Accepts a JSON body with the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | Yes | Search query or URL (for fetch engine) |
+| `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, or `llm-context` |
+| `cache` | bool | No | Enable result caching (default: `false`) |
+| `cache_ttl` | int | No | Cache TTL in minutes (default: `10`) |
+| `semantic_cache` | bool | No | Enable semantic similarity cache (default: `false`) |
+| `semantic_threshold` | float | No | Cosine similarity threshold (default: `0.9`) |
+| `offset` | int | No | Pagination offset (Brave only) |
+| `flaresolverr` | bool | No | Force FlareSolverr for fetch engine (default: `false`) |
+
+```bash
+# Brave search
+curl -X POST https://ccsearch.0ruka.dev/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"query": "React 19 new features", "engine": "brave"}'
+
+# Perplexity synthesized answer
+curl -X POST https://ccsearch.0ruka.dev/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"query": "What is the difference between Vue 3 and React 18?", "engine": "perplexity"}'
+
+# Fetch a URL
+curl -X POST https://ccsearch.0ruka.dev/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"query": "https://react.dev/blog", "engine": "fetch"}'
+
+# With caching
+curl -X POST https://ccsearch.0ruka.dev/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"query": "Python asyncio tutorial", "engine": "brave", "cache": true, "cache_ttl": 60}'
+```
+
+#### `GET /engines`
+List available search engines and their server-side requirements.
+```bash
+curl https://ccsearch.0ruka.dev/engines \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Deployment
+
+The API server runs as a systemd service (`ccsearch-api.service`) with automatic restart on failure. Environment variables (API keys, port) are loaded from `.env`.
+
+```bash
+sudo systemctl enable ccsearch-api   # Enable on boot
+sudo systemctl start ccsearch-api    # Start
+sudo systemctl status ccsearch-api   # Check status
+journalctl -u ccsearch-api -f        # View logs
+```
+
+The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
+
+---
+
 ## FlareSolverr Integration (Optional)
 
 The `fetch` engine can automatically fall back to [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) when it encounters Cloudflare-protected pages or JS-rendered SPAs. FlareSolverr is a self-hosted proxy that uses a real Chromium browser to solve browser challenges.
