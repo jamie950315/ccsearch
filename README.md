@@ -331,8 +331,29 @@ ccsearch "Python asyncio event loop tutorial" -e brave --format json --semantic-
 - If the command returns an error about missing `BRAVE_API_KEY`, `BRAVE_SEARCH_API_KEY`, or `OPENROUTER_API_KEY`, immediately inform the user that they need to set the environment variable and provide them the exact `export` command they need to run in their terminal.
 - Don't try to guess URLs; use this tool instead!
 
+## Claude Code Skill (HTTP API Mode)
+
+If you deploy ccsearch as a self-hosted HTTP server, you can install it as a **Claude Code skill** so that Claude automatically uses your server for all web searches — no CLI needed on the client machine.
+
+### Setup
+
+1. Copy the skill file into your Claude Code skills directory:
+   ```bash
+   mkdir -p ~/.claude/skills/ccsearch
+   cp skills/SKILL.md ~/.claude/skills/ccsearch/SKILL.md
+   ```
+2. Edit `~/.claude/skills/ccsearch/SKILL.md` and replace all `YOUR_CCSEARCH_BASE_URL` with your actual server URL (e.g., `https://ccsearch.example.com`).
+3. Set the API key:
+   ```bash
+   export CCSEARCH_API_KEY="your_api_key"
+   ```
+
+Once installed, Claude Code will automatically invoke `/ccsearch` whenever it needs to search the web, fetch URLs, or get LLM-optimized context — routing all requests through your server via `curl`.
+
+The skill template is located at [`skills/SKILL.md`](skills/SKILL.md).
+
 ## Instructing Your AI to Use `ccsearch` (CLAUDE.md)
-To ensure your AI agents (like Claude Code) automatically use this tool instead of hallucinating or using default, less-capable search tools, we highly recommend adding the following guidelines to your project's or home directory's `CLAUDE.md` (or equivalent system prompt instructions file). 
+To ensure your AI agents (like Claude Code) automatically use this tool instead of hallucinating or using default, less-capable search tools, we highly recommend adding the following guidelines to your project's or home directory's `CLAUDE.md` (or equivalent system prompt instructions file).
 
 Copy and paste the snippet below into your `CLAUDE.md`:
 
