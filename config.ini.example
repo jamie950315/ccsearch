@@ -85,3 +85,8 @@ flaresolverr_timeout = 60000
 #           "always"   = always use FlareSolverr for every fetch request.
 #           "never"    = never use FlareSolverr even if configured.
 flaresolverr_mode = fallback
+
+# Minimum content length (chars) from direct fetch before triggering FlareSolverr fallback.
+# If the extracted text is shorter than this, the page likely requires JS rendering.
+# Only applies when flaresolverr_mode = fallback and flaresolverr_url is set.
+min_content_length = 200
