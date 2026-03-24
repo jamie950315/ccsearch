@@ -7,7 +7,7 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **LLM Context** (via Brave LLM Context API): Returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. Extracts text, tables, code blocks, and structured data from multiple sources in a single API call — no scraping needed. Ideal for RAG pipelines and AI agent grounding.
 4. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
+5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages. **Twitter/X URLs** are automatically intercepted and routed through the [fxtwitter API](https://github.com/FixTweet/FixTweet) to retrieve tweet content, author info, and engagement metrics without login.
 
 ## Requirements & Setup
 
@@ -56,6 +56,12 @@ ccsearch "What is the new React compiler?" -e both --format text
 
 # Fetch a webpage's clean text
 ccsearch "https://react.dev/blog/2025/10/07/react-compiler-1" -e fetch --format text
+
+# Fetch a tweet (auto-routed via fxtwitter API)
+ccsearch "https://x.com/jack/status/20" -e fetch --format text
+
+# Fetch a Twitter/X user profile
+ccsearch "https://x.com/NASA" -e fetch --format text
 
 # Force FlareSolverr for a Cloudflare-protected page
 ccsearch "https://some-cloudflare-site.com" -e fetch --format text --flaresolverr

@@ -1016,6 +1016,242 @@ class TestFlaresolverrFetch(unittest.TestCase):
 
 
 # ===========================================================================
+# 10b. Twitter/X URL detection and fxtwitter formatting
+# ===========================================================================
+class TestIsTwitterUrl(unittest.TestCase):
+    """Tests for _is_twitter_url URL parsing."""
+
+    def test_tweet_url_x_dot_com(self):
+        result = ccsearch._is_twitter_url("https://x.com/jack/status/20")
+        self.assertEqual(result, ("jack", "20"))
+
+    def test_tweet_url_twitter_dot_com(self):
+        result = ccsearch._is_twitter_url("https://twitter.com/NASA/status/123456")
+        self.assertEqual(result, ("NASA", "123456"))
+
+    def test_tweet_url_mobile(self):
+        result = ccsearch._is_twitter_url("https://mobile.twitter.com/user/status/999")
+        self.assertEqual(result, ("user", "999"))
+
+    def test_tweet_url_www(self):
+        result = ccsearch._is_twitter_url("https://www.x.com/test_user/status/42")
+        self.assertEqual(result, ("test_user", "42"))
+
+    def test_profile_url(self):
+        result = ccsearch._is_twitter_url("https://x.com/elonmusk")
+        self.assertEqual(result, ("elonmusk", None))
+
+    def test_profile_url_twitter(self):
+        result = ccsearch._is_twitter_url("https://twitter.com/NASA")
+        self.assertEqual(result, ("NASA", None))
+
+    def test_url_with_query_params(self):
+        result = ccsearch._is_twitter_url("https://x.com/user123/status/555?lang=en")
+        self.assertEqual(result, ("user123", "555"))
+
+    def test_url_with_fragment(self):
+        result = ccsearch._is_twitter_url("https://x.com/user123/status/555#top")
+        self.assertEqual(result, ("user123", "555"))
+
+    def test_reserved_path_home(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/home"))
+
+    def test_reserved_path_explore(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/explore"))
+
+    def test_reserved_path_settings(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/settings"))
+
+    def test_reserved_path_intent(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/intent"))
+
+    def test_reserved_path_compose(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/compose"))
+
+    def test_non_twitter_url(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://example.com/jack/status/20"))
+
+    def test_root_url_no_path(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/"))
+
+    def test_invalid_handle_too_long(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/thishandleiswaytoolongfortwitter"))
+
+    def test_invalid_handle_special_chars(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/user@name"))
+
+    def test_http_scheme(self):
+        result = ccsearch._is_twitter_url("http://x.com/jack/status/20")
+        self.assertEqual(result, ("jack", "20"))
+
+    def test_no_hostname_rejected(self):
+        self.assertIsNone(ccsearch._is_twitter_url("/jack/status/20"))
+
+    def test_relative_path_rejected(self):
+        self.assertIsNone(ccsearch._is_twitter_url("jack/status/20"))
+
+    def test_status_with_non_numeric_id_rejected(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/user/status/notanid"))
+
+    def test_status_without_id_rejected(self):
+        self.assertIsNone(ccsearch._is_twitter_url("https://x.com/user/status/"))
+
+
+class TestSafeInt(unittest.TestCase):
+    """Tests for _safe_int helper."""
+
+    def test_normal_int(self):
+        self.assertEqual(ccsearch._safe_int(42), 42)
+
+    def test_none_returns_default(self):
+        self.assertEqual(ccsearch._safe_int(None), 0)
+
+    def test_string_number(self):
+        self.assertEqual(ccsearch._safe_int("123"), 123)
+
+    def test_non_numeric_string(self):
+        self.assertEqual(ccsearch._safe_int("abc"), 0)
+
+    def test_custom_default(self):
+        self.assertEqual(ccsearch._safe_int(None, -1), -1)
+
+    def test_float_truncates(self):
+        self.assertEqual(ccsearch._safe_int(3.9), 3)
+
+
+class TestFormatTweet(unittest.TestCase):
+    """Tests for _format_tweet output and robustness."""
+
+    def _sample_tweet(self, **overrides):
+        tweet = {
+            "text": "hello world",
+            "author": {"screen_name": "test", "name": "Test User"},
+            "likes": 100, "retweets": 50, "replies": 10,
+            "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+            "views": None,
+        }
+        tweet.update(overrides)
+        return tweet
+
+    def test_basic_format(self):
+        out = ccsearch._format_tweet(self._sample_tweet())
+        self.assertIn("@test", out)
+        self.assertIn("hello world", out)
+        self.assertIn("Likes: 100", out)
+
+    def test_none_likes_no_crash(self):
+        out = ccsearch._format_tweet(self._sample_tweet(likes=None))
+        self.assertIn("Likes: 0", out)
+
+    def test_none_views_omitted(self):
+        out = ccsearch._format_tweet(self._sample_tweet(views=None))
+        self.assertNotIn("Views:", out)
+
+    def test_views_present(self):
+        out = ccsearch._format_tweet(self._sample_tweet(views=50000))
+        self.assertIn("Views: 50,000", out)
+
+    def test_string_metrics_no_crash(self):
+        out = ccsearch._format_tweet(self._sample_tweet(likes="bad", retweets="nope"))
+        self.assertIn("Likes: 0", out)
+        self.assertIn("Retweets: 0", out)
+
+    def test_replying_to(self):
+        out = ccsearch._format_tweet(self._sample_tweet(replying_to="other"))
+        self.assertIn("Replying to: @other", out)
+
+    def test_media_photos(self):
+        media = {"photos": [{"url": "https://img.example.com/1.jpg"}]}
+        out = ccsearch._format_tweet(self._sample_tweet(media=media))
+        self.assertIn("[Photo]", out)
+
+    def test_quoted_tweet(self):
+        quote = {"author": {"screen_name": "quotee"}, "text": "original"}
+        out = ccsearch._format_tweet(self._sample_tweet(quote=quote))
+        self.assertIn("Quoted @quotee", out)
+
+
+class TestFormatTwitterUser(unittest.TestCase):
+    """Tests for _format_twitter_user output and robustness."""
+
+    def _sample_user(self, **overrides):
+        user = {
+            "screen_name": "nasa", "name": "NASA",
+            "description": "Space agency",
+            "followers": 90000000, "following": 100,
+            "tweets": 70000, "likes": 15000,
+            "joined": "Wed Dec 19 00:00:00 +0000 2007",
+        }
+        user.update(overrides)
+        return user
+
+    def test_basic_format(self):
+        out = ccsearch._format_twitter_user(self._sample_user())
+        self.assertIn("@nasa", out)
+        self.assertIn("90,000,000", out)
+
+    def test_none_followers_no_crash(self):
+        out = ccsearch._format_twitter_user(self._sample_user(followers=None))
+        self.assertIn("Followers: 0", out)
+
+    def test_location_shown(self):
+        out = ccsearch._format_twitter_user(self._sample_user(location="DC"))
+        self.assertIn("Location: DC", out)
+
+    def test_website_shown(self):
+        out = ccsearch._format_twitter_user(self._sample_user(website={"display_url": "nasa.gov"}))
+        self.assertIn("Website: nasa.gov", out)
+
+
+class TestFetchTwitterIntegration(unittest.TestCase):
+    """Integration test for _fetch_twitter with mocked API."""
+
+    @patch('ccsearch.requests.get')
+    def test_tweet_fetch_success(self, mock_get):
+        mock_get.return_value.json.return_value = {
+            "code": 200, "message": "OK",
+            "tweet": {
+                "text": "just setting up", "url": "https://x.com/jack/status/20",
+                "author": {"screen_name": "jack", "name": "jack"},
+                "likes": 300000, "retweets": 120000, "replies": 17000,
+                "created_at": "Tue Mar 21 20:50:14 +0000 2006", "views": None,
+            }
+        }
+        result = ccsearch._fetch_twitter("https://x.com/jack/status/20", ("jack", "20"))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["fetched_via"], "fxtwitter")
+        self.assertIn("just setting up", result["content"])
+
+    @patch('ccsearch.requests.get')
+    def test_user_fetch_success(self, mock_get):
+        mock_get.return_value.json.return_value = {
+            "code": 200, "message": "OK",
+            "user": {
+                "screen_name": "NASA", "name": "NASA",
+                "description": "Space", "followers": 90000000,
+                "following": 100, "tweets": 70000, "likes": 15000,
+                "joined": "2007",
+            }
+        }
+        result = ccsearch._fetch_twitter("https://x.com/NASA", ("NASA", None))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["fetched_via"], "fxtwitter")
+        self.assertIn("@NASA", result["content"])
+
+    @patch('ccsearch.requests.get')
+    def test_api_404_returns_none(self, mock_get):
+        mock_get.return_value.json.return_value = {"code": 404, "message": "NOT_FOUND", "tweet": None}
+        result = ccsearch._fetch_twitter("https://x.com/x/status/999", ("x", "999"))
+        self.assertIsNone(result)
+
+    @patch('ccsearch.requests.get')
+    def test_network_error_returns_none(self, mock_get):
+        mock_get.side_effect = requests.ConnectionError("timeout")
+        result = ccsearch._fetch_twitter("https://x.com/jack/status/20", ("jack", "20"))
+        self.assertIsNone(result)
+
+
+# ===========================================================================
 # 11. perform_fetch — orchestrator (all modes & paths)
 # ===========================================================================
 class TestPerformFetch(unittest.TestCase):
@@ -1349,7 +1585,11 @@ class TestMainCLI(unittest.TestCase):
 
     def test_flaresolverr_flag_no_url_warning(self):
         """--flaresolverr with no URL should warn and still work."""
-        with patch('ccsearch.perform_fetch') as mock_pf:
+        with patch('ccsearch.perform_fetch') as mock_pf, \
+             patch('ccsearch.load_config') as mock_cfg:
+            cfg = configparser.ConfigParser()
+            cfg['Fetch'] = {'flaresolverr_url': '', 'flaresolverr_timeout': '60000', 'flaresolverr_mode': 'fallback'}
+            mock_cfg.return_value = cfg
             mock_pf.return_value = {"engine": "fetch", "url": "http://x", "title": "T",
                                     "content": "C", "fetched_via": "direct"}
             out, err, code = self._run_main(['http://x', '-e', 'fetch', '--format', 'json', '--flaresolverr'])

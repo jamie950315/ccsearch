@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import re
 import argparse
 import configparser
 import requests
@@ -449,8 +450,119 @@ def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
         raise Exception(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
     return data["solution"]["response"]
 
+_TWITTER_HOSTS={'twitter.com','www.twitter.com','mobile.twitter.com','x.com','www.x.com','mobile.x.com'}
+_TWITTER_NON_USER_PATHS={'home','explore','search','notifications','messages','settings','i','tos','privacy','hashtag','intent','share','login','compose','who_to_follow','lists'}
+_TWITTER_HANDLE_RE=re.compile(r'^[A-Za-z0-9_]{1,15}$')
+
+def _is_twitter_url(url):
+    """Check if URL is a Twitter/X link and return (screen_name, tweet_id) or None."""
+    from urllib.parse import urlparse
+    parsed=urlparse(url)
+    if not parsed.hostname or parsed.hostname.lower() not in _TWITTER_HOSTS:
+        return None
+    segments=[s for s in parsed.path.strip('/').split('/') if s]
+    if not segments:
+        return None
+    user=segments[0]
+    if user.lower() in _TWITTER_NON_USER_PATHS:
+        return None
+    if not _TWITTER_HANDLE_RE.match(user):
+        return None
+    # If path has /status/ segment, require a valid numeric ID
+    if len(segments)>=2 and segments[1].lower()=='status':
+        if len(segments)>=3 and segments[2].isdigit():
+            return (user, segments[2])
+        return None
+    return (user, None)
+
+def _safe_int(val, default=0):
+    """Safely cast a value to int, returning default on failure."""
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+def _format_tweet(tweet):
+    """Format a fxtwitter tweet JSON object into readable text."""
+    author=tweet.get('author', {})
+    parts=[
+        f"@{author.get('screen_name', '?')} ({author.get('name', '?')})",
+        f"  {tweet.get('text', '')}",
+        "",
+        f"  Date: {tweet.get('created_at', '?')}",
+        f"  Likes: {_safe_int(tweet.get('likes')):,}  Retweets: {_safe_int(tweet.get('retweets')):,}  Replies: {_safe_int(tweet.get('replies')):,}",
+    ]
+    views=_safe_int(tweet.get('views'))
+    if views:
+        parts.append(f"  Views: {views:,}")
+    if tweet.get('replying_to'):
+        parts.append(f"  Replying to: @{tweet['replying_to']}")
+    media=tweet.get('media', {})
+    for mtype in ('photos', 'videos'):
+        for item in media.get(mtype, []):
+            parts.append(f"  [{mtype[:-1].title()}] {item.get('url', '')}")
+    if tweet.get('quote'):
+        q=tweet['quote']
+        qa=q.get('author', {})
+        parts.extend(["", f"  Quoted @{qa.get('screen_name','?')}: {q.get('text', '')}"])
+    return '\n'.join(parts)
+
+def _format_twitter_user(user):
+    """Format a fxtwitter user JSON object into readable text."""
+    parts=[
+        f"@{user.get('screen_name', '?')} ({user.get('name', '?')})",
+        f"  {user.get('description', '')}",
+        "",
+        f"  Followers: {_safe_int(user.get('followers')):,}  Following: {_safe_int(user.get('following')):,}",
+        f"  Tweets: {_safe_int(user.get('tweets')):,}  Likes: {_safe_int(user.get('likes')):,}",
+        f"  Joined: {user.get('joined', '?')}",
+    ]
+    if user.get('location'):
+        parts.append(f"  Location: {user['location']}")
+    if user.get('website', {}).get('display_url'):
+        parts.append(f"  Website: {user['website']['display_url']}")
+    return '\n'.join(parts)
+
+def _fetch_twitter(url, parsed):
+    """Fetch Twitter/X content via fxtwitter API. Returns result dict or None on failure."""
+    user, tweet_id=parsed
+    if tweet_id:
+        api_url=f"https://api.fxtwitter.com/{user}/status/{tweet_id}"
+    else:
+        api_url=f"https://api.fxtwitter.com/{user}"
+    sys.stderr.write(f"[ccsearch] Twitter/X URL detected, using fxtwitter API: {api_url}\n")
+    try:
+        resp=requests.get(api_url, timeout=15)
+        data=resp.json()
+    except Exception as e:
+        sys.stderr.write(f"[ccsearch] fxtwitter API request failed: {e}\n")
+        return None
+    if data.get('code') != 200:
+        sys.stderr.write(f"[ccsearch] fxtwitter API error: {data.get('message', 'Unknown')}\n")
+        return None
+    if tweet_id and data.get('tweet'):
+        t=data['tweet']
+        title=f"@{t.get('author',{}).get('screen_name','?')}: {t.get('text','')[:80]}"
+        content=_format_tweet(t)
+        return {"engine": "fetch", "url": url, "title": title, "content": content, "fetched_via": "fxtwitter"}
+    elif not tweet_id and data.get('user'):
+        u=data['user']
+        title=f"@{u.get('screen_name','?')} — Twitter/X Profile"
+        content=_format_twitter_user(u)
+        return {"engine": "fetch", "url": url, "title": title, "content": content, "fetched_via": "fxtwitter"}
+    return None
+
 def perform_fetch(url, config):
     """Fetch and extract clean text from a webpage with optional FlareSolverr fallback."""
+    # Intercept Twitter/X URLs and use fxtwitter API
+    parsed=_is_twitter_url(url)
+    if parsed:
+        result=_fetch_twitter(url, parsed)
+        if result:
+            return result
+        sys.stderr.write("[ccsearch] fxtwitter API failed, falling back to normal fetch...\n")
     flaresolverrUrl=config.get('Fetch', 'flaresolverr_url', fallback='').strip()
     flaresolverrTimeout=config.getint('Fetch', 'flaresolverr_timeout', fallback=60000)
     flaresolverrMode=config.get('Fetch', 'flaresolverr_mode', fallback='fallback').strip().lower()
