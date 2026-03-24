@@ -7,7 +7,7 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **LLM Context** (via Brave LLM Context API): Returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. Extracts text, tables, code blocks, and structured data from multiple sources in a single API call — no scraping needed. Ideal for RAG pipelines and AI agent grounding.
 4. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
+5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected and JS-rendered pages.
 
 ## Requirements & Setup
 
@@ -214,7 +214,10 @@ The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
 
 ## FlareSolverr Integration (Optional)
 
-The `fetch` engine can automatically fall back to [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) when it encounters Cloudflare-protected pages or JS-rendered SPAs. FlareSolverr is a self-hosted proxy that uses a real Chromium browser to solve browser challenges.
+The `fetch` engine uses a multi-layered approach to access protected websites:
+
+1. **curl_cffi** (recommended): Impersonates Chrome's TLS fingerprint (JA3/JA4), which bypasses most anti-bot detection (Facebook, LinkedIn, Medium, Instagram, etc.). Install with `pip install curl_cffi`. Falls back to `requests` if not installed.
+2. **FlareSolverr**: For Cloudflare challenge pages and JS-rendered SPAs that require a real browser. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a self-hosted proxy that uses a real Chromium browser to solve browser challenges.
 
 ### Setup
 1. Run FlareSolverr via Docker:
