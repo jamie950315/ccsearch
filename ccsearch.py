@@ -624,13 +624,18 @@ def perform_fetch(url, config):
                 return {"engine": "fetch", "url": url, "error": f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}"}
         # No Cloudflare — parse direct response
         title, cleanText=_clean_html(response.content)
-        # Detect JS-heavy SPA shells and auto-fallback to FlareSolverr
-        isSpa, spaReason=_detect_spa_shell(response.content, len(cleanText))
+        # Detect JS-heavy SPA shells and auto-fallback to FlareSolverr (HTML only)
+        contentType=response.headers.get('Content-Type', '').lower()
+        isHtml='text/html' in contentType or 'application/xhtml' in contentType
+        isSpa=False
+        spaReason=""
+        if isHtml and response.status_code==200:
+            isSpa, spaReason=_detect_spa_shell(response.content, len(cleanText))
         if canFallback and isSpa:
             sys.stderr.write(f"[ccsearch] SPA shell detected ({spaReason}), falling back to FlareSolverr...\n")
             try:
                 html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
-                sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
+                sys.stderr.write("[ccsearch] FlareSolverr rendered page successfully.\n")
                 fTitle, fCleanText=_clean_html(html)
                 if len(fCleanText)>len(cleanText):
                     return {"engine": "fetch", "url": url, "title": fTitle, "content": fCleanText, "fetched_via": "flaresolverr"}
