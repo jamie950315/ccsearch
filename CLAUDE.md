@@ -24,7 +24,7 @@ The script `ccsearch.py` handles CLI parsing through `argparse` and loads defaul
 
 The `llm-context` engine calls Brave's LLM Context API (`/res/v1/llm/context`), which returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. It shares the same `BRAVE_API_KEY` and rate limiting as the `brave` engine. Configuration lives in the `[LLMContext]` section of `config.ini`.
 
-The `fetch` engine uses a layered approach: `_simple_fetch` (bare `requests.get`) → Cloudflare detection (`_detect_cloudflare`) → optional `_flaresolverr_fetch` fallback. The orchestrator `perform_fetch` reads `[Fetch]` config to decide the execution strategy (`fallback`, `always`, or `never`). FlareSolverr communication is a simple `requests.post()` to its HTTP API — no extra dependencies required.
+The `fetch` engine uses a layered approach: `_simple_fetch` → Cloudflare detection (`_detect_cloudflare`) → optional `_flaresolverr_fetch` fallback. When `curl_cffi` is installed, `_simple_fetch` uses Chrome TLS fingerprint impersonation (`impersonate="chrome"`) to bypass anti-bot detection on strict sites (Facebook, LinkedIn, Medium, etc.); otherwise it falls back to `requests.get`. Request headers match a real Chrome 146 browser (including `Sec-Ch-Ua`, `Sec-Fetch-*`, and a Google `Referer`). The orchestrator `perform_fetch` reads `[Fetch]` config to decide the execution strategy (`fallback`, `always`, or `never`). FlareSolverr communication is a simple `requests.post()` to its HTTP API — no extra dependencies required.
 
 ## HTTP API Server
 `api_server.py` is a Flask-based HTTP API that exposes all ccsearch engines over the network. It runs on port 8888 (configurable via `CCSEARCH_PORT` env var) behind a Cloudflare Tunnel at `ccsearch.0ruka.dev`.
