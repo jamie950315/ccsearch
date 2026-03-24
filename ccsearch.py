@@ -48,7 +48,8 @@ def load_config(config_file):
     config['Fetch'] = {
         'flaresolverr_url': '',
         'flaresolverr_timeout': '60000',
-        'flaresolverr_mode': 'fallback'
+        'flaresolverr_mode': 'fallback',
+        'min_content_length': '200'
     }
 
     if os.path.exists(config_file):
@@ -600,8 +601,21 @@ def perform_fetch(url, config):
                 return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "flaresolverr"}
             except Exception as flareErr:
                 return {"engine": "fetch", "url": url, "error": f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}"}
-        # No Cloudflare or no fallback configured — use direct response
+        # No Cloudflare — parse direct response
         title, cleanText=_clean_html(response.content)
+        # If content is suspiciously short (JS-heavy SPA), try FlareSolverr
+        minChars=config.getint('Fetch', 'min_content_length', fallback=200)
+        if canFallback and len(cleanText)<minChars:
+            sys.stderr.write(f"[ccsearch] Content too short ({len(cleanText)} chars < {minChars}), falling back to FlareSolverr...\n")
+            try:
+                html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+                sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
+                fTitle, fCleanText=_clean_html(html)
+                if len(fCleanText)>len(cleanText):
+                    return {"engine": "fetch", "url": url, "title": fTitle, "content": fCleanText, "fetched_via": "flaresolverr"}
+                sys.stderr.write("[ccsearch] FlareSolverr result not better, using direct response.\n")
+            except Exception as flareErr:
+                sys.stderr.write(f"[ccsearch] FlareSolverr fallback failed: {flareErr}\n")
         return {"engine": "fetch", "url": url, "title": title, "content": cleanText, "fetched_via": "direct"}
 
     # Simple fetch failed — try FlareSolverr fallback
