@@ -48,8 +48,7 @@ def load_config(config_file):
     config['Fetch'] = {
         'flaresolverr_url': '',
         'flaresolverr_timeout': '60000',
-        'flaresolverr_mode': 'fallback',
-        'min_content_length': '200'
+        'flaresolverr_mode': 'fallback'
     }
 
     if os.path.exists(config_file):
@@ -398,6 +397,28 @@ CLOUDFLARE_INDICATORS=[
     "challenge-platform"
 ]
 
+_SPA_MOUNT_POINTS=[
+    'id="root"', 'id="app"', 'id="__next"', 'id="__nuxt"',
+    'id="___gatsby"', 'id="svelte"', 'id="ember-application"',
+    'id="react-root"', 'id="react-app"',
+]
+
+def _detect_spa_shell(raw_html, clean_text_len):
+    """Detect if page is a JS-heavy SPA shell that needs headless rendering.
+    Checks for empty SPA mount points and script-heavy pages with little text."""
+    if clean_text_len < 50:
+        return True, "almost no text content"
+    html=raw_html if isinstance(raw_html, str) else raw_html.decode('utf-8', errors='ignore')
+    html_lower=html.lower()
+    if clean_text_len < 500:
+        for mount in _SPA_MOUNT_POINTS:
+            if mount in html_lower:
+                return True, f"SPA mount point ({mount}) with only {clean_text_len} chars"
+    script_count=html_lower.count('<script')
+    if script_count > 5 and clean_text_len < 200:
+        return True, f"{script_count} script tags but only {clean_text_len} chars of text"
+    return False, ""
+
 def _clean_html(html):
     """Parse HTML and extract clean text content. Returns (title, cleanText)."""
     soup=BeautifulSoup(html, 'html.parser')
@@ -603,10 +624,10 @@ def perform_fetch(url, config):
                 return {"engine": "fetch", "url": url, "error": f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}"}
         # No Cloudflare — parse direct response
         title, cleanText=_clean_html(response.content)
-        # If content is suspiciously short (JS-heavy SPA), try FlareSolverr
-        minChars=config.getint('Fetch', 'min_content_length', fallback=200)
-        if canFallback and len(cleanText)<minChars:
-            sys.stderr.write(f"[ccsearch] Content too short ({len(cleanText)} chars < {minChars}), falling back to FlareSolverr...\n")
+        # Detect JS-heavy SPA shells and auto-fallback to FlareSolverr
+        isSpa, spaReason=_detect_spa_shell(response.content, len(cleanText))
+        if canFallback and isSpa:
+            sys.stderr.write(f"[ccsearch] SPA shell detected ({spaReason}), falling back to FlareSolverr...\n")
             try:
                 html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
                 sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
