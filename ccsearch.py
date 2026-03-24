@@ -13,6 +13,11 @@ import requests
 import hashlib
 import concurrent.futures
 from bs4 import BeautifulSoup
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI=True
+except ImportError:
+    HAS_CURL_CFFI=False
 
 def load_config(config_file):
     config = configparser.ConfigParser()
@@ -369,9 +374,19 @@ def perform_llm_context_search(query, api_key, config):
     }
 
 FETCH_HEADERS={
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Chromium";v="146", "Google Chrome";v="146", "Not:A-Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 CLOUDFLARE_INDICATORS=[
@@ -405,7 +420,22 @@ def _detect_cloudflare(response):
     return False
 
 def _simple_fetch(url, maxRetries=2):
-    """Fetch a webpage using bare requests.get()."""
+    """Fetch a webpage. Uses curl_cffi for TLS impersonation when available, otherwise requests.Session."""
+    if HAS_CURL_CFFI:
+        for attempt in range(maxRetries+1):
+            try:
+                session=cffi_requests.Session(impersonate="chrome")
+                response=session.get(url, headers=FETCH_HEADERS, timeout=30)
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                status=getattr(getattr(e, 'response', None), 'status_code', None)
+                if status and 400<=status<500 and status!=429:
+                    raise
+                if attempt<maxRetries:
+                    time.sleep(2**attempt)
+                    continue
+                raise
     return retry_request('GET', url, maxRetries, headers=FETCH_HEADERS, timeout=(10, 30))
 
 def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):

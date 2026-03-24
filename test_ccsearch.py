@@ -895,6 +895,7 @@ class TestDetectCloudflare(unittest.TestCase):
 # ===========================================================================
 class TestSimpleFetch(unittest.TestCase):
 
+    @patch('ccsearch.HAS_CURL_CFFI', False)
     @patch('ccsearch.retry_request')
     def test_calls_retry_request_with_get(self, mock_req):
         resp = _mock_response(200, text='<html>ok</html>')
@@ -904,6 +905,7 @@ class TestSimpleFetch(unittest.TestCase):
                                           headers=ccsearch.FETCH_HEADERS, timeout=(10, 30))
         self.assertEqual(result, resp)
 
+    @patch('ccsearch.HAS_CURL_CFFI', False)
     @patch('ccsearch.retry_request')
     def test_default_retries(self, mock_req):
         resp = _mock_response(200)
@@ -911,11 +913,51 @@ class TestSimpleFetch(unittest.TestCase):
         ccsearch._simple_fetch('http://x')
         self.assertEqual(mock_req.call_args[0][2], 2)  # default maxRetries
 
+    @patch('ccsearch.HAS_CURL_CFFI', False)
     @patch('ccsearch.retry_request')
     def test_propagates_exception(self, mock_req):
         mock_req.side_effect = requests.exceptions.Timeout("t")
         with self.assertRaises(requests.exceptions.Timeout):
             ccsearch._simple_fetch('http://x')
+
+    @patch('ccsearch.HAS_CURL_CFFI', True)
+    @patch('ccsearch.cffi_requests', create=True)
+    def test_curl_cffi_path_success(self, mock_cffi):
+        mock_session = MagicMock()
+        mock_resp = _mock_response(200, text='<html>ok</html>')
+        mock_session.get.return_value = mock_resp
+        mock_cffi.Session.return_value = mock_session
+        result = ccsearch._simple_fetch('http://example.com', maxRetries=2)
+        mock_cffi.Session.assert_called_once_with(impersonate="chrome")
+        mock_session.get.assert_called_once_with('http://example.com', headers=ccsearch.FETCH_HEADERS, timeout=30)
+        self.assertEqual(result, mock_resp)
+
+    @patch('ccsearch.HAS_CURL_CFFI', True)
+    @patch('ccsearch.cffi_requests', create=True)
+    def test_curl_cffi_path_4xx_no_retry(self, mock_cffi):
+        mock_session = MagicMock()
+        err = Exception("400 Bad Request")
+        err.response = MagicMock(status_code=400)
+        mock_session.get.side_effect = err
+        mock_cffi.Session.return_value = mock_session
+        with self.assertRaises(Exception):
+            ccsearch._simple_fetch('http://x', maxRetries=2)
+        # Should NOT retry on 4xx (except 429)
+        self.assertEqual(mock_session.get.call_count, 1)
+
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.HAS_CURL_CFFI', True)
+    @patch('ccsearch.cffi_requests', create=True)
+    def test_curl_cffi_path_retries_on_5xx(self, mock_cffi, mock_sleep):
+        mock_session = MagicMock()
+        err = Exception("500 Server Error")
+        err.response = MagicMock(status_code=500)
+        mock_session.get.side_effect = err
+        mock_cffi.Session.return_value = mock_session
+        with self.assertRaises(Exception):
+            ccsearch._simple_fetch('http://x', maxRetries=1)
+        # Should retry: 1 initial + 1 retry = 2 calls
+        self.assertEqual(mock_session.get.call_count, 2)
 
 
 # ===========================================================================
