@@ -86,7 +86,7 @@ flaresolverr_timeout = 60000
 #           "never"    = never use FlareSolverr even if configured.
 flaresolverr_mode = fallback
 
-# Minimum content length (chars) from direct fetch before triggering FlareSolverr fallback.
-# If the extracted text is shorter than this, the page likely requires JS rendering.
-# Only applies when flaresolverr_mode = fallback and flaresolverr_url is set.
-min_content_length = 200
+# SPA auto-detection: When flaresolverr_mode = fallback, the fetch engine automatically
+# detects JS-heavy SPA shells (empty mount points like <div id="root">, script-heavy pages
+# with little text) and falls back to FlareSolverr for headless rendering.
+# No configuration needed — detection is based on HTML structure, not a fixed char threshold.
