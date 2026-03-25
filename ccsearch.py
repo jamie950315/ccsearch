@@ -472,7 +472,7 @@ def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
         raise Exception(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
     return data["solution"]["response"]
 
-_TWITTER_HOSTS={'twitter.com','www.twitter.com','mobile.twitter.com','x.com','www.x.com','mobile.x.com'}
+_TWITTER_HOSTS={'twitter.com','www.twitter.com','mobile.twitter.com','x.com','www.x.com','mobile.x.com','api.fxtwitter.com','fxtwitter.com','vxtwitter.com','fixvx.com'}
 _TWITTER_NON_USER_PATHS={'home','explore','search','notifications','messages','settings','i','tos','privacy','hashtag','intent','share','login','compose','who_to_follow','lists'}
 _TWITTER_HANDLE_RE=re.compile(r'^[A-Za-z0-9_]{1,15}$')
 
