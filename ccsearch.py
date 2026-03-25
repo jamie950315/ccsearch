@@ -511,11 +511,23 @@ def _format_tweet(tweet):
     author=tweet.get('author', {})
     parts=[
         f"@{author.get('screen_name', '?')} ({author.get('name', '?')})",
+    ]
+    if author.get('description'):
+        parts.append(f"  Bio: {author['description']}")
+    author_stats=[]
+    if author.get('followers') is not None:
+        author_stats.append(f"Followers: {_safe_int(author.get('followers')):,}")
+    if author.get('following') is not None:
+        author_stats.append(f"Following: {_safe_int(author.get('following')):,}")
+    if author_stats:
+        parts.append(f"  {' | '.join(author_stats)}")
+    parts.extend([
+        "",
         f"  {tweet.get('text', '')}",
         "",
         f"  Date: {tweet.get('created_at', '?')}",
         f"  Likes: {_safe_int(tweet.get('likes')):,}  Retweets: {_safe_int(tweet.get('retweets')):,}  Replies: {_safe_int(tweet.get('replies')):,}",
-    ]
+    ])
     views=_safe_int(tweet.get('views'))
     if views:
         parts.append(f"  Views: {views:,}")
