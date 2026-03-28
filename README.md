@@ -218,6 +218,71 @@ The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
 
 ---
 
+## MCP Server
+
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over SSE transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `.env` configuration.
+
+### Architecture
+
+```
+ccsearch.py (core search logic, shared)
+    ├── api_server.py   (Flask HTTP API, port 8888)
+    └── mcp_server.py   (MCP SSE server, port 8890)
+```
+
+### Tools
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `search` | Web search via brave/perplexity/both/llm-context engines | `query`, `engine`, `offset`, `cache`, `cache_ttl`, `semantic_cache`, `semantic_threshold` |
+| `fetch` | Fetch and extract text from a URL | `url`, `flaresolverr`, `cache`, `cache_ttl` |
+
+### Authentication
+
+Path-based authentication — the API key is embedded in the URL path:
+
+```
+https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse
+```
+
+Requests to any other path (missing or incorrect key) receive a `401 Unauthorized` response.
+
+### Client Configuration
+
+**Claude Desktop (`claude_desktop_config.json`)**:
+```json
+{
+  "mcpServers": {
+    "ccsearch": {
+      "url": "https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse"
+    }
+  }
+}
+```
+
+**Python MCP SDK**:
+```python
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+async with sse_client("https://ccsearch-mcp.0ruka.dev/<KEY>/sse") as (r, w):
+    async with ClientSession(r, w) as session:
+        await session.initialize()
+        await session.call_tool("search", {"query": "hello", "engine": "brave"})
+```
+
+### Deployment
+
+- **Runtime**: Python 3.13 (`/usr/bin/python3`) with `mcp>=1.26.0`
+- **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
+- **Systemd service**: `ccsearch-mcp.service`
+- **Cloudflare Tunnel**: `ccsearch-mcp.0ruka.dev → localhost:8890`
+
+```bash
+sudo systemctl enable --now ccsearch-mcp.service
+sudo systemctl status ccsearch-mcp
+```
+
 ## FlareSolverr Integration (Optional)
 
 The `fetch` engine uses a multi-layered approach to access protected websites:
