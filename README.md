@@ -242,7 +242,8 @@ ccsearch.py (core search logic, shared)
 Path-based authentication — the API key is embedded in the URL path:
 
 ```
-https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse
+SSE:             https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse
+Streamable HTTP: https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/mcp
 ```
 
 Requests to any other path (missing or incorrect key) receive a `401 Unauthorized` response.
@@ -260,12 +261,23 @@ Requests to any other path (missing or incorrect key) receive a `401 Unauthorize
 }
 ```
 
-**Python MCP SDK**:
+**Python MCP SDK (SSE)**:
 ```python
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
 async with sse_client("https://ccsearch-mcp.0ruka.dev/<KEY>/sse") as (r, w):
+    async with ClientSession(r, w) as session:
+        await session.initialize()
+        await session.call_tool("search", {"query": "hello", "engine": "brave"})
+```
+
+**Python MCP SDK (Streamable HTTP)**:
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as (r, w, _):
     async with ClientSession(r, w) as session:
         await session.initialize()
         await session.call_tool("search", {"query": "hello", "engine": "brave"})

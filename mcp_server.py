@@ -201,16 +201,22 @@ if __name__=="__main__":
         return JSONResponse({"error": "Unauthorized", "message": "Invalid or missing API key in path"}, status_code=401)
 
     async def main():
-        # Mount MCP SSE app under /<API_KEY>/ prefix
-        # mount_path makes SSE return correct /KEY/messages/ endpoint to clients
-        inner=mcp.sse_app()  # no mount_path — Starlette Mount sets root_path automatically
-        app=Starlette(routes=[
-            Mount(f"/{API_KEY}", app=inner),
-            Route("/{path:path}", unauthorized),
-        ])
+        # Build combined app: SSE (/sse + /messages/) + Streamable HTTP (/mcp)
+        sse_inner=mcp.sse_app()
+        http_inner=mcp.streamable_http_app()
+        combined=Starlette(routes=list(sse_inner.routes)+list(http_inner.routes))
+
+        # lifespan must be on the outermost app for uvicorn to trigger it
+        app=Starlette(
+            routes=[
+                Mount(f"/{API_KEY}", app=combined),
+                Route("/{path:path}", unauthorized, methods=["GET","POST","PUT","DELETE","PATCH","OPTIONS"]),
+            ],
+            lifespan=lambda app: mcp.session_manager.run(),
+        )
 
         print(f"[ccsearch-mcp] Starting MCP server on port {PORT} (path auth: {'enabled' if API_KEY else 'DISABLED'})")
-        print(f"[ccsearch-mcp] SSE endpoint: /<key>/sse")
+        print(f"[ccsearch-mcp] SSE: /<key>/sse | Streamable HTTP: /<key>/mcp")
         config=uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
         server=uvicorn.Server(config)
         await server.serve()
