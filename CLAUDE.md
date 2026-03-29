@@ -43,7 +43,9 @@ Twitter/X URLs (`x.com`, `twitter.com`) are automatically intercepted and routed
 - **Runtime**: System Python 3.13 (`/usr/bin/python3`) with `mcp` 1.26.0 (FastMCP)
 - **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
 - **Systemd**: `ccsearch-mcp.service`
-- **Public endpoint**: `https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse`
+- **Public endpoint (SSE)**: `https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse`
+- **Public endpoint (Streamable HTTP)**: `https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/mcp`
 - **Authentication**: Path-based — the API key is embedded in the URL path prefix. Requests without a valid key get 401.
 - **Tools exposed**: `search` (brave/perplexity/both/llm-context engines) and `fetch` (URL content extraction)
-- **Architecture**: Starlette `Mount` places the FastMCP SSE app under `/<key>/`, so the SSE transport automatically returns the correct `/<key>/messages/` endpoint to clients. No middleware auth needed.
+- **Transports**: SSE (`/<key>/sse` + `/<key>/messages/`) and Streamable HTTP (`/<key>/mcp`)
+- **Architecture**: Starlette `Mount` places the combined SSE + Streamable HTTP app under `/<key>/`. No middleware auth needed.
