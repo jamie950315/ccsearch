@@ -69,8 +69,40 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 | `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, `llm-context` |
 | `cache` | bool | No | Enable server-side caching |
 | `cache_ttl` | int | No | Cache TTL in minutes |
+| `semantic_cache` | bool | No | Enable semantic similarity cache |
+| `semantic_threshold` | float | No | Semantic cache similarity threshold |
 | `offset` | int | No | Pagination offset (brave only) |
+| `result_limit` | int | No | Trim returned results for `brave`, `both`, `llm-context` |
 | `flaresolverr` | bool | No | Force FlareSolverr proxy (fetch only) |
+| `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, `llm-context` |
+| `exclude_hosts` | list/string | No | Host deny-list for `brave`, `both`, `llm-context` |
+
+### Batch (POST /batch)
+
+```bash
+curl -s -X POST YOUR_CCSEARCH_BASE_URL/batch \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $CCSEARCH_API_KEY" \
+  -d '{
+        "max_workers": 4,
+        "defaults": {"cache": true, "cache_ttl": 30},
+        "requests": [
+          {"query": "React compiler release", "engine": "brave"},
+          {"query": "https://react.dev/blog", "engine": "fetch"}
+        ]
+      }'
+```
+
+Use batch when you need multiple independent searches/fetches in one round-trip.
+
+### Diagnostics (GET /diagnostics)
+
+```bash
+curl -s YOUR_CCSEARCH_BASE_URL/diagnostics \
+  -H "X-API-Key: $CCSEARCH_API_KEY"
+```
+
+Returns runtime dependency state, configured engines, fetch/FlareSolverr status, and batch defaults.
 
 #### Engine Selection Guide
 
@@ -147,6 +179,15 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
   -d '{"query": "python asyncio", "engine": "brave", "offset": 1}'
 ```
 
+### Restrict search to specific hosts and keep only top-N results
+
+```bash
+curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $CCSEARCH_API_KEY" \
+  -d '{"query": "OpenAI Responses API", "engine": "brave", "include_hosts": ["developers.openai.com"], "result_limit": 3}'
+```
+
 ### X/Twitter content via fxtwitter
 
 ```bash
@@ -164,8 +205,14 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 {
   "engine": "brave",
   "query": "...",
+  "cache_status": "disabled",
+  "duration_ms": 123.45,
+  "result_count": 3,
+  "result_hosts": ["developers.openai.com"],
+  "host_filtering": {"include_hosts": ["developers.openai.com"], "exclude_hosts": [], "removed_results": 4},
+  "result_limiting": {"limit": 3, "removed_results": 2},
   "results": [
-    {"title": "...", "url": "...", "description": "..."}
+    {"title": "...", "url": "...", "description": "...", "hostname": "...", "rank": 1}
   ]
 }
 ```
@@ -176,7 +223,10 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 {
   "engine": "perplexity",
   "query": "...",
-  "answer": "Synthesized answer with citations..."
+  "cache_status": "disabled",
+  "duration_ms": 123.45,
+  "answer": "Synthesized answer with citations...",
+  "citations": [{"url": "...", "title": "..."}]
 }
 ```
 
@@ -186,8 +236,11 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 {
   "engine": "both",
   "query": "...",
+  "cache_status": "disabled",
+  "duration_ms": 123.45,
   "perplexity_answer": "...",
-  "brave_results": [...]
+  "brave_results": [...],
+  "perplexity_citations": [{"url": "...", "title": "..."}]
 }
 ```
 
@@ -197,9 +250,14 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 {
   "engine": "llm-context",
   "query": "...",
+  "cache_status": "disabled",
+  "duration_ms": 123.45,
+  "result_count": 2,
+  "source_count": 2,
   "results": [
-    {"url": "...", "title": "...", "snippets": ["..."]}
-  ]
+    {"url": "...", "title": "...", "hostname": "...", "rank": 1, "snippets": ["..."]}
+  ],
+  "sources": {"https://example.com": {"hostname": "example.com"}}
 }
 ```
 
@@ -211,7 +269,13 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
   "url": "...",
   "title": "...",
   "content": "Extracted text...",
-  "fetched_via": "direct"
+  "fetched_via": "direct",
+  "cache_status": "disabled",
+  "duration_ms": 123.45,
+  "final_url": "...",
+  "content_type": "text/html",
+  "status_code": 200,
+  "chunks": [{"index": 1, "type": "paragraph", "text": "...", "chunk_id": "..."}]
 }
 ```
 
@@ -222,7 +286,7 @@ Non-200 responses return `{"error": "message"}`. Common cases:
 | Status | Meaning |
 |--------|---------|
 | 401 | Missing or invalid API key |
-| 400 | Bad request (missing query/engine, invalid URL for fetch) |
+| 400 | Bad request (missing query/engine, invalid URL for fetch, unsupported option combinations) |
 | 502 | Upstream API error (Brave/Perplexity/target site down) |
 
 ## Important Notes
@@ -232,4 +296,7 @@ Non-200 responses return `{"error": "message"}`. Common cases:
 - For multi-topic research, make multiple requests with different queries.
 - Keep search queries short and specific (1-6 words) for best Brave results.
 - Use `llm-context` when you need content chunks to reason over; use `brave` when you need links and snippets.
+- Use `include_hosts`, `exclude_hosts`, and `result_limit` when you need tighter source control instead of post-filtering results yourself.
+- Use `/diagnostics` or `/engines` when a request fails and you need to check whether dependencies or engine capabilities are available server-side.
+- Use `/batch` when you have several independent lookups/fetches and want one network round-trip.
 - The server handles all API keys, rate limits, and caching internally.
