@@ -90,3 +90,8 @@ flaresolverr_mode = fallback
 # detects JS-heavy SPA shells (empty mount points like <div id="root">, script-heavy pages
 # with little text) and falls back to FlareSolverr for headless rendering.
 # No configuration needed — detection is based on HTML structure, not a fixed char threshold.
+
+[Batch]
+# Maximum number of worker threads used by batch execution.
+# Increase for network-heavy workloads; keep modest to avoid exhausting rate limits.
+max_workers = 4

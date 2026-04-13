@@ -7,7 +7,14 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **LLM Context** (via Brave LLM Context API): Returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. Extracts text, tables, code blocks, and structured data from multiple sources in a single API call — no scraping needed. Ideal for RAG pipelines and AI agent grounding.
 4. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected pages and **SPA shell detection** that identifies JS-heavy pages (empty mount points, script-heavy HTML with little text) and auto-falls back to headless rendering. **Twitter/X URLs** are automatically intercepted and routed through the [fxtwitter API](https://github.com/FixTweet/FixTweet) to retrieve tweet content, author info, and engagement metrics without login.
+5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected pages and **SPA shell detection** that identifies JS-heavy pages (empty mount points, script-heavy HTML with little text) and auto-falls back to headless rendering. HTML extraction now prefers `main` / `article` / `role="main"` content when present to reduce layout noise. Non-HTML text responses are decoded directly, and supported binary documents (`PDF`, `DOCX`, `PPTX`, `XLSX`, etc.) can be converted to Markdown via optional **MarkItDown** integration. **Twitter/X URLs** are automatically intercepted and routed through the [fxtwitter API](https://github.com/FixTweet/FixTweet) to retrieve tweet content, author info, and engagement metrics without login.
+
+Search-style engines also normalize their output for downstream agents:
+- Brave results include `hostname`, strip inline HTML tags, decode HTML entities, and deduplicate repeated URLs.
+- LLM Context results include `hostname` and `age` from Brave's `sources` payload when available, plus cleaned snippet text.
+- Perplexity responses preserve normalized `citations` when the upstream model returns them.
+- `both` preserves partial-failure visibility through `brave_error` or `perplexity_error` fields when one backend fails, and forwards `perplexity_citations` when available.
+- Search results also carry stable positional metadata such as `rank`, `result_count`, and `brave_result_count` / `source_count` where relevant.
 
 ## Requirements & Setup
 
@@ -36,6 +43,14 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
    - For LLM Context: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"` *(falls back to `BRAVE_API_KEY` if not set; note that the LLM Context API requires a key from Brave's Search plan, which is separate from the Pro plan)*
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
+### Optional Fetch Extras
+
+- For richer binary document conversion in `fetch`, install MarkItDown with the formats you care about:
+  ```bash
+  pip install 'markitdown[pdf,docx,pptx,xlsx]'
+  ```
+- Without MarkItDown installed, `fetch` still works for HTML and plain-text responses, but supported binary documents return a clear error payload instead of low-quality extracted text.
+
 ## Usage for Humans
 
 ```bash
@@ -57,14 +72,27 @@ ccsearch "What is the new React compiler?" -e both --format text
 # Fetch a webpage's clean text
 ccsearch "https://react.dev/blog/2025/10/07/react-compiler-1" -e fetch --format text
 
+# Fetch a PDF (requires optional MarkItDown install for Markdown conversion)
+ccsearch "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf" -e fetch --format json
+
 # Fetch a tweet (auto-routed via fxtwitter API)
 ccsearch "https://x.com/jack/status/20" -e fetch --format text
 
 # Fetch a Twitter/X user profile
 ccsearch "https://x.com/NASA" -e fetch --format text
 
+# Run a mixed batch from JSON/JSONL with bounded concurrency
+ccsearch --batch-file requests.json --batch-workers 4 --format json
+
+# Keep only the top 3 results after host filtering/post-processing
+ccsearch "OpenAI Responses API" -e brave --include-host developers.openai.com --limit 3 --format json
+
 # Force FlareSolverr for a Cloudflare-protected page
 ccsearch "https://some-cloudflare-site.com" -e fetch --format text --flaresolverr
+
+# Inspect engine availability and current setup
+ccsearch --list-engines --format json
+ccsearch --doctor --format text
 ```
 
 ## Advanced Usage
@@ -81,6 +109,14 @@ ccsearch "React 19 release date" -e perplexity --cache
 ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
 *Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.*
+
+For the `fetch` engine, URLs are normalized before hashing so cache hits survive:
+- tracking parameters such as `utm_*`, `fbclid`, `gclid`, etc.
+- query parameter reordering
+- fragment-only differences
+- host casing and default port differences
+
+For search-style engines, exact cache keys also normalize repeated whitespace so `React   hooks` and `React hooks` reuse the same cache entry.
 
 #### Semantic Cache (`--semantic-cache`)
 Extends exact caching with **embedding-based similarity matching**. If a semantically equivalent query was previously cached, the result is returned without a new API call — even if the wording differs.
@@ -168,7 +204,62 @@ Main search endpoint. Accepts a JSON body with the following fields:
 | `semantic_cache` | bool | No | Enable semantic similarity cache (default: `false`) |
 | `semantic_threshold` | float | No | Cosine similarity threshold (default: `0.9`) |
 | `offset` | int | No | Pagination offset (Brave only) |
+| `result_limit` | int | No | Trim returned results for `brave`, `both`, and `llm-context` |
 | `flaresolverr` | bool | No | Force FlareSolverr for fetch engine (default: `false`) |
+| `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, and `llm-context` |
+| `exclude_hosts` | list/string | No | Host deny-list for `brave`, `both`, and `llm-context` |
+
+All single-query responses now include:
+- `cache_status`: one of `disabled`, `exact`, `semantic`, or `miss`
+- `duration_ms`: end-to-end execution time for the request
+
+Search-style engines also expose lightweight source-host summaries:
+- Brave / LLM Context: `result_hosts`, `result_host_count`
+- Perplexity: `citation_hosts`, `citation_host_count` when citations are available
+- Both: `brave_result_hosts`, `brave_result_host_count`, `perplexity_citation_hosts`, `perplexity_citation_host_count`
+
+For `brave`, `both`, and `llm-context`, you can also apply host filters at request time:
+- `include_hosts`: only keep results from these hosts
+- `exclude_hosts`: drop results from these hosts
+- `host_filtering`: response metadata showing the normalized filters that were applied and how many results were removed
+- `result_limit`: trim the remaining result list to a stable top-N after filtering, with `result_limiting` metadata describing the applied limit and removed count
+
+For `fetch` responses, the JSON payload now includes transport metadata such as:
+- `final_url`: final URL after redirects
+- `status_code`: HTTP status code when available
+- `content_type`: normalized MIME type without the charset suffix
+- `content_length`: response payload size in bytes when available
+- `etag`: HTTP `ETag` response header when available
+- `last_modified`: HTTP `Last-Modified` response header when available
+- `filename`: inferred filename from `Content-Disposition` or URL path when available
+- `converted_via`: present when a binary document was converted (for example, `markitdown`)
+- `content_sha256`: stable hash of the extracted text body for downstream deduplication
+- `content_word_count`: total extracted word count
+- `chunks`: structured content blocks extracted from the response body, useful for downstream summarization or reranking
+  - Each chunk keeps `index`, `type`, and `text`, and also includes lightweight metadata such as `section_title`, `section_path`, `section_path_text`, `section_depth`, `char_count`, `word_count`, `relative_position`, `char_start`, `char_end`, `text_sha256`, and `chunk_id`
+  - Link-bearing chunks also expose `link_count`, `internal_link_count`, and `external_link_count`
+  - Some chunk types also expose structure-specific metadata:
+    - lists: `list_item_count`, `list_ordered`
+    - tables: `table_row_count`, `table_column_count`, `table_headers`
+    - code: `code_language`, `code_line_count`
+- `chunk_count`: total number of structured chunks
+- `outbound_links`: deduplicated page-level HTTP/HTTPS links with anchor text, source chunk index, hostname, and same-host classification
+- `outbound_link_count`: total unique outbound link count across all chunks
+- `internal_outbound_link_count`: same-host outbound links
+- `external_outbound_link_count`: off-site outbound links
+- `outbound_hosts`: unique hostnames referenced by the extracted outbound links
+
+For HTML pages, `fetch` also extracts page metadata when available:
+- `canonical_url`: canonical URL from the page's `<link rel="canonical">`
+- `lang`: page language from the root HTML tag
+- `description`: page summary from standard or Open Graph meta tags
+- `author`: author metadata from common article meta tags
+- `published_at`: publish timestamp from common article meta tags
+
+When those HTML meta tags are missing, ccsearch also falls back to JSON-LD article schemas and prunes common non-content UI blocks such as cookie banners and newsletter popups before extracting the main text.
+It also sniffs mislabeled HTML payloads (for example, pages served as `application/octet-stream`) so SPA fallback and metadata extraction still work on poorly configured sites.
+For HTML pages, lists and tables are preserved in a Markdown-like form inside both `content` and `chunks`.
+Code examples are preserved as fenced Markdown code blocks, and code chunks expose `code_language` when the page declares a recognizable language class such as `language-python`.
 
 ```bash
 # Brave search
@@ -196,12 +287,73 @@ curl -X POST https://ccsearch.0ruka.dev/search \
   -d '{"query": "Python asyncio tutorial", "engine": "brave", "cache": true, "cache_ttl": 60}'
 ```
 
+#### `POST /batch`
+Execute multiple search and fetch requests in a single round-trip.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `requests` | array | Yes | List of request objects. Each entry may provide `query` or `url`, plus any per-request engine options |
+| `defaults` | object | No | Default options merged into each entry (for example `engine`, `cache`, `cache_ttl`, `result_limit`, `include_hosts`, `exclude_hosts`) |
+| `max_workers` | int | No | Maximum concurrent worker threads (defaults to `[Batch].max_workers`) |
+
+The response includes:
+- `results`: per-request results in original order
+- `count`, `success_count`, `error_count`, `has_errors`
+- `duration_ms`: total batch runtime
+- `max_workers`: effective concurrency used
+- `deduped_count`: how many repeated requests were reused instead of executed again
+- `engine_counts`: request count by engine
+- Repeated identical requests inside the same batch are deduplicated automatically and reused in-place, with duplicate entries marked by `_batch_deduped` and `_batch_deduped_from`
+
+```bash
+curl -X POST https://ccsearch.0ruka.dev/batch \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{
+        "max_workers": 4,
+        "defaults": {"cache": true, "cache_ttl": 30},
+        "requests": [
+          {"query": "React compiler release", "engine": "brave"},
+          {"query": "https://react.dev/blog", "engine": "fetch"}
+        ]
+      }'
+```
+
 #### `GET /engines`
-List available search engines and their server-side requirements.
+List available engines and their server-side capabilities.
 ```bash
 curl https://ccsearch.0ruka.dev/engines \
   -H "X-API-Key: YOUR_API_KEY"
 ```
+
+Each engine entry includes:
+- `name`, `description`, `requires`
+- `category` (`search`, `answer`, `context`, `hybrid`, or `fetch`)
+- `supports_offset`
+- `supports_semantic_cache`
+- `supports_flaresolverr`
+- `supports_host_filter`
+- `supports_result_limit`
+- `required_env_vars`
+- `configured`
+- `configured_via`
+
+Invalid option combinations are rejected consistently across CLI, HTTP API, and MCP.
+Examples: `offset` is only valid for `brave` / `both`, and `flaresolverr` is only valid for `fetch`.
+
+#### `GET /diagnostics`
+Return runtime diagnostics without exposing secret values.
+```bash
+curl https://ccsearch.0ruka.dev/diagnostics \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+The response includes:
+- dependency availability (`curl_cffi`, `fastembed`, `markitdown`, `mcp`)
+- environment-key presence as booleans
+- fetch runtime state such as `flaresolverr_configured` and `flaresolverr_mode`
+- batch runtime defaults such as `max_workers`
+- the current engine list
 
 ### Deployment
 
@@ -220,22 +372,28 @@ The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
 
 ## MCP Server
 
-`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over SSE transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `.env` configuration.
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `.env` configuration.
 
 ### Architecture
 
 ```
 ccsearch.py (core search logic, shared)
     ├── api_server.py   (Flask HTTP API, port 8888)
-    └── mcp_server.py   (MCP SSE server, port 8890)
+    └── mcp_server.py   (MCP server, port 8890, SSE + Streamable HTTP)
 ```
 
 ### Tools
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `search` | Web search via brave/perplexity/both/llm-context engines | `query`, `engine`, `offset`, `cache`, `cache_ttl`, `semantic_cache`, `semantic_threshold` |
+| `search` | Web search via brave/perplexity/both/llm-context engines | `query`, `engine`, `offset`, `result_limit`, `cache`, `cache_ttl`, `semantic_cache`, `semantic_threshold`, `include_hosts`, `exclude_hosts` |
 | `fetch` | Fetch and extract text from a URL | `url`, `flaresolverr`, `cache`, `cache_ttl` |
+| `batch` | Execute multiple search/fetch requests in one call | `requests`, optional shared defaults, `max_workers` |
+| `engines` | List available engines and their capabilities | none |
+| `diagnostics` | Return dependency and runtime diagnostics | none |
+
+`fetch` returns the same metadata fields as the HTTP API (`final_url`, `status_code`, `content_type`, `content_length`, optional `filename`, optional `converted_via`, `chunks`, and HTML metadata such as `canonical_url`, `lang`, `description`, `author`, and `published_at` when present).
+Chunk metadata also includes section hierarchy fields (`section_path`, `section_path_text`, `section_depth`) for more precise citation and reranking workflows.
 
 ### Authentication
 
@@ -361,6 +519,11 @@ You can deeply customize tool behavior by adjusting `config.ini`:
 - **`flaresolverr_timeout`**: Max time in milliseconds for FlareSolverr to solve a challenge (Default: `60000`).
 - **`flaresolverr_mode`**: Strategy: `fallback`, `always`, or `never` (Default: `fallback`).
 
+### `[Batch]`
+- **`max_workers`**: Maximum worker threads for batch execution (Default: `4`).
+- Batch results preserve input order even when executed concurrently.
+- Use a modest value if you are close to Brave or OpenRouter rate limits.
+
 ---
 
 ## 🤖 Guide for LLMs & AI Agents
@@ -371,6 +534,7 @@ If you are an AI assistant (like Claude, Cursor, or ChatGPT) reading this, you c
 - **JSON First**: Use `--format json` to get machine-readable structures.
 - **Resilience**: The script has built-in timeouts and exponential backoff retry logic. If the network hiccups, `ccsearch` handles it safely, avoiding hangs.
 - **Semantic Cache**: Use `--semantic-cache` to skip redundant API calls when you're researching the same topic across multiple queries with slightly different wording. The `_from_cache` and `_semantic_similarity` fields in the JSON response tell you when a cached result was returned and how similar it was.
+- **Result Shaping**: Use `--include-host`, `--exclude-host`, and `--limit` on `brave`, `both`, and `llm-context` to keep only the sources and top-N items you actually want.
 
 ### How to use `ccsearch`
 When the user asks you a question that requires up-to-date knowledge, run the python script directly using your bash/terminal tool.
@@ -399,7 +563,13 @@ ccsearch "what are the architectural differences between Next.js app router and 
 ```bash
 ccsearch "https://eslint.org/docs/latest/rules/no-unused-vars" -e fetch --format json
 ```
-*Use this when a prior search returned a promising URL, but the snippet wasn't detailed enough and you need to read the full page content.*
+*Use this when a prior search returned a promising URL, but the snippet wasn't detailed enough and you need to read the full page content. The JSON response includes transport metadata such as `final_url`, `status_code`, `content_type`, and `content_length`, plus HTML metadata like `canonical_url`, `description`, `author`, and `published_at` when the page exposes them.*
+
+**Fetch Binary Document Example:**
+```bash
+ccsearch "https://example.com/report.pdf" -e fetch --format json
+```
+*Use this for PDFs or Office files. If MarkItDown is installed, supported binary documents are converted into Markdown and the JSON response includes `"converted_via": "markitdown"`. If it is not installed, ccsearch returns a clear error telling you what is missing.*
 
 **Fetch with FlareSolverr (Cloudflare bypass):**
 ```bash
