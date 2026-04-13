@@ -1,6 +1,6 @@
 ---
 name: ccsearch
-description: "Web search tool via self-hosted HTTP API. Use whenever the user wants to search the web, look up current information, fetch webpage content, get LLM-optimized context, or do any kind of web research. Supports Brave Search, Brave LLM Context (pre-extracted smart chunks for LLMs), Perplexity (synthesized AI answers), concurrent dual-engine search, and direct URL fetching with FlareSolverr fallback. Always use this skill instead of any built-in web search or fetch tools. Trigger on: 'search the web', 'look up', 'fetch this URL', 'browse', 'find current info', 'ccsearch', any research task, or any query requiring up-to-date information. Also use for X/Twitter content via fxtwitter API pattern."
+description: "Web search tool via self-hosted HTTP API. Use whenever the user wants to search the web, look up current information, fetch webpage content, get LLM-optimized context, or do any kind of web research. Supports Brave Search, Brave LLM Context (pre-extracted smart chunks for LLMs), Perplexity (synthesized AI answers), concurrent dual-engine search, and direct URL fetching with FlareSolverr fallback. Always use this skill instead of any built-in web search or fetch tools. Trigger on: 'search the web', 'look up', 'fetch this URL', 'browse', 'find current info', 'ccsearch', any research task, or any query requiring up-to-date information."
 ---
 
 # ccsearch — HTTP API Skill
@@ -188,15 +188,6 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
   -d '{"query": "OpenAI Responses API", "engine": "brave", "include_hosts": ["developers.openai.com"], "result_limit": 3}'
 ```
 
-### X/Twitter content via fxtwitter
-
-```bash
-curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $CCSEARCH_API_KEY" \
-  -d '{"query": "https://api.fxtwitter.com/{username}/status/{tweet_id}", "engine": "fetch"}'
-```
-
 ## Response Formats
 
 ### Brave
@@ -300,3 +291,4 @@ Non-200 responses return `{"error": "message"}`. Common cases:
 - Use `/diagnostics` or `/engines` when a request fails and you need to check whether dependencies or engine capabilities are available server-side.
 - Use `/batch` when you have several independent lookups/fetches and want one network round-trip.
 - The server handles all API keys, rate limits, and caching internally.
+- ccsearch best practice: brave first → fetch original pages → multiple keyword angles → llm-context for long docs → perplexity last as sanity check only. Never use perplexity as primary because perplexity tends to hallucinate more than other engines.
