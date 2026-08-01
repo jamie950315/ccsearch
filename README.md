@@ -39,8 +39,8 @@ Search-style engines also normalize their output for downstream agents:
    ```
    *(Ensure `~/.local/bin` is in your environment's PATH so you can just run `ccsearch` from anywhere)*
 5. Set your Environment Variables:
-   - For Brave Web Search: `export BRAVE_API_KEY="your_brave_api_key"`
-   - For LLM Context: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"` *(falls back to `BRAVE_API_KEY` if not set; note that the LLM Context API requires a key from Brave's Search plan, which is separate from the Pro plan)*
+   - For all Brave-backed engines: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"`
+   - `brave`, the Brave side of `both`, and `llm-context` all prefer `BRAVE_SEARCH_API_KEY`. The legacy `BRAVE_API_KEY` remains a compatibility fallback only when the Search key is unset.
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
 ### Optional Fetch Extras
@@ -102,13 +102,13 @@ ccsearch --doctor --format text
 #### Exact Cache (`--cache`)
 Caches results by an exact hash of the query string. Subsequent identical queries return instantly without hitting the API.
 ```bash
-# Cache the result for the default 10 minutes
+# Cache the result for the default 90 days
 ccsearch "React 19 release date" -e perplexity --cache
 
 # Cache the result for a custom duration (e.g., 60 minutes)
 ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
-*Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.*
+*Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.* The default and maximum readable age is 90 days (`129600` minutes). A smaller `--cache-ttl` shortens the freshness window. Beginning on day 91, result files are deleted by the hourly maintenance timer or the next cache cleanup pass. Run `ccsearch --prune-cache --format json` to enforce retention immediately.
 
 For the `fetch` engine, URLs are normalized before hashing so cache hits survive:
 - tracking parameters such as `utm_*`, `fbclid`, `gclid`, etc.
@@ -151,7 +151,7 @@ ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshol
 **Notes:**
 - Applies to `brave`, `perplexity`, `both`, and `llm-context` engines. The `fetch` engine always uses exact URL matching.
 - If `fastembed` is not installed, a warning is printed and the tool continues without semantic matching.
-- The same `--cache-ttl` applies to both caches.
+- The same `--cache-ttl` applies to both caches. It cannot exceed 90 days, and semantic-index entries are removed when their result files are deleted.
 
 **Benchmark results** (Brave engine, 6 query pairs):
 
@@ -173,7 +173,7 @@ ccsearch can also be accessed remotely via the built-in HTTP API server (`api_se
 # Start the server (default port 8888)
 python3 api_server.py
 
-# Or via systemd (production)
+# Or via systemd (current Pi deployment)
 sudo systemctl start ccsearch-api
 ```
 
@@ -200,10 +200,10 @@ Main search endpoint. Accepts a JSON body with the following fields:
 | `query` | string | Yes | Search query or URL (for fetch engine) |
 | `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, or `llm-context` |
 | `cache` | bool | No | Enable result caching (default: `false`) |
-| `cache_ttl` | int | No | Cache TTL in minutes (default: `10`) |
+| `cache_ttl` | int | No | Cache freshness in minutes (default/max: `129600`, or 90 days) |
 | `semantic_cache` | bool | No | Enable semantic similarity cache (default: `false`) |
 | `semantic_threshold` | float | No | Cosine similarity threshold (default: `0.9`) |
-| `offset` | int | No | Pagination offset (Brave only) |
+| `offset` | int | No | Pagination offset (`brave` and `both` only) |
 | `result_limit` | int | No | Trim returned results for `brave`, `both`, and `llm-context` |
 | `flaresolverr` | bool | No | Force FlareSolverr for fetch engine (default: `false`) |
 | `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, and `llm-context` |
@@ -357,7 +357,11 @@ The response includes:
 
 ### Deployment
 
-The API server runs as a systemd service (`ccsearch-api.service`) with automatic restart on failure. Environment variables (API keys, port) are loaded from `.env`.
+On the current Pi deployment, the API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/jamie/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first.
+
+`ccsearch-cache-prune.timer` runs the checked-in `systemd/ccsearch-cache-prune.service` hourly so files that have reached day 91 are removed even when they are never requested again.
+
+This service currently starts Flask's built-in server directly. It is suitable for the existing personal deployment but is not a production WSGI/ASGI setup; replacing it remains tracked in `TODO.md`.
 
 ```bash
 sudo systemctl enable ccsearch-api   # Enable on boot
@@ -372,7 +376,7 @@ The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
 
 ## MCP Server
 
-`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `.env` configuration.
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the current Pi deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
 
 ### Architecture
 
@@ -405,6 +409,8 @@ Streamable HTTP: https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/mcp
 ```
 
 Requests to any other path (missing or incorrect key) receive a `401 Unauthorized` response.
+
+The key-bearing path can appear in Uvicorn, systemd, proxy, and client access logs. Treat complete MCP URLs as secrets, redact the first path segment before sharing logs, and rotate the key if such a URL is exposed.
 
 ### Client Configuration
 
@@ -461,10 +467,11 @@ The `fetch` engine uses a multi-layered approach to access protected websites:
 2. **FlareSolverr**: For Cloudflare challenge pages and JS-rendered SPAs that require a real browser. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) is a self-hosted proxy that uses a real Chromium browser to solve browser challenges.
 
 ### Setup
-1. Run FlareSolverr via Docker:
+1. Start the checked-in Docker Compose service:
    ```bash
-   docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
+   docker compose up -d flaresolverr
    ```
+   The included compose file publishes port `8191` on all interfaces. FlareSolverr has no authentication, so Internet-facing hosts should change the mapping to `127.0.0.1:8191:8191` or enforce an equivalent firewall rule.
 2. Add the URL to your `config.ini`:
    ```ini
    [Fetch]
@@ -493,7 +500,7 @@ The tool automatically detects Cloudflare challenges by checking for:
 You can deeply customize tool behavior by adjusting `config.ini`:
 
 ### `[Brave]`
-- **`requests_per_second`**: Rate limiting to prevent ban (Default: `1`).
+- **`requests_per_second`**: Combined local limit for Brave Web Search and LLM Context (Default: `1`, hard-capped at the Search plan's `50` RPS). CLI, HTTP API, MCP, batch workers, and retries coordinate through one cross-process limiter on this host. Other devices using the same Brave subscription are outside this limiter.
 - **`count`**: Number of results to fetch per request (Default: `10`).
 - **`safesearch`**: Content filtering level: `off`, `moderate`, or `strict`.
 - **`freshness`**: Filter by time: `pd` (Past 24h), `pw` (Past week), `pm` (Past month), `py` (Past year). Leave blank for no limit.
@@ -551,7 +558,7 @@ ccsearch "anthropic claude 3.5 sonnet release date" -e brave --format json
 ```bash
 ccsearch "React hooks best practices" -e llm-context --format json
 ```
-*Use this when you need pre-extracted web content optimized for LLM grounding. Returns smart chunks (text, tables, code blocks, structured data) from multiple sources in a single call — far more token-efficient than fetching pages individually. Requires `BRAVE_SEARCH_API_KEY` (or falls back to `BRAVE_API_KEY`).*
+*Use this when you need pre-extracted web content optimized for LLM grounding. Returns smart chunks (text, tables, code blocks, structured data) from multiple sources in a single call — far more token-efficient than fetching pages individually. Like every Brave-backed engine, it prefers `BRAVE_SEARCH_API_KEY` and falls back to `BRAVE_API_KEY` only when the Search key is unset.*
 
 **Both Engines Example:**
 ```bash

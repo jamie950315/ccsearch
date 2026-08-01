@@ -1,6 +1,8 @@
 [Brave]
-# Rate limiting: Maximum number of requests allowed per second.
-# Prevents getting banned. Set according to your API tier (e.g., 1 for free tier).
+# Combined requests per second for Brave Web Search and LLM Context. CLI, HTTP,
+# MCP, batch workers, and retries on this host share one cross-process limiter.
+# The code hard-caps this at the current Search plan capacity of 50 RPS. Keep the
+# portable default at 1 and set it according to your own subscription.
 requests_per_second = 1
 
 # Number of search results to return per query (max 20 for free tier, default is 10).
@@ -19,8 +21,9 @@ safesearch = moderate
 #   py (Past year)
 freshness =
 
-# Number of times to auto-retry the request if a timeout or network error occurs.
-# Uses exponential backoff (e.g., waits 1s, 2s, 4s before trying again).
+# Number of retries after the first attempt for timeouts, network errors, HTTP
+# 429, and 5xx responses. Other 4xx responses are not retried. A value of 2
+# allows three total attempts with 1s and 2s backoff delays.
 max_retries = 2
 
 [Perplexity]
@@ -39,8 +42,8 @@ temperature = 0.1
 # Useful for controlling API costs and generation time.
 max_tokens = 1024
 
-# Number of times to auto-retry the request if a timeout or network error occurs.
-# Uses exponential backoff.
+# Number of retries after the first attempt for timeouts, network errors, HTTP
+# 429, and 5xx responses. Other 4xx responses are not retried.
 max_retries = 2
 
 [LLMContext]
@@ -68,12 +71,14 @@ context_threshold_mode = balanced
 # Time-based filtering (same values as Brave: pd, pw, pm, py, or blank).
 freshness =
 
-# Number of times to auto-retry on timeout or network error.
+# Number of retries after the first attempt for timeouts, network errors, HTTP
+# 429, and 5xx responses. Other 4xx responses are not retried.
 max_retries = 2
 
 [Fetch]
 # FlareSolverr proxy URL for bypassing Cloudflare and rendering JS-heavy pages.
-# Leave blank to disable the fallback (only bare HTTP requests will be used).
+# Leave blank to disable the fallback (direct fetch uses curl_cffi when
+# available, otherwise requests).
 # Requires a running FlareSolverr instance (Docker recommended).
 # Example: http://localhost:8191/v1 or http://pi5.tailnet:8191/v1
 flaresolverr_url =
@@ -81,7 +86,7 @@ flaresolverr_url =
 # Maximum time (ms) to wait for FlareSolverr to solve a challenge.
 flaresolverr_timeout = 60000
 
-# Strategy: "fallback" = try requests.get first, use FlareSolverr only on failure.
+# Strategy: "fallback" = try direct fetch first, use FlareSolverr only on failure.
 #           "always"   = always use FlareSolverr for every fetch request.
 #           "never"    = never use FlareSolverr even if configured.
 flaresolverr_mode = fallback

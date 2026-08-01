@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""
-ccsearch - A CLI Web Search Utility for LLMs and Human users.
-Supports Brave Search API and Perplexity (via OpenRouter).
+"""Shared ccsearch core and CLI for search, context retrieval, and URL fetches.
+
+Supports Brave, Perplexity via OpenRouter, the combined engine, Brave LLM
+Context, and direct fetch with optional FlareSolverr fallback.
 """
 import os
 import sys
@@ -18,8 +19,13 @@ import hashlib
 import tempfile
 import concurrent.futures
 import threading
+from contextlib import contextmanager
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup, NavigableString, Tag
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the deployed Pi/Linux runtime provides fcntl
+    fcntl=None
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CURL_CFFI=True
@@ -97,6 +103,12 @@ def get_cache_dir():
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 
+DEFAULT_CACHE_TTL_MINUTES=90 * 24 * 60
+CACHE_MAX_READ_AGE_SECONDS=90 * 24 * 60 * 60
+CACHE_DELETE_AGE_SECONDS=91 * 24 * 60 * 60
+CACHE_CLEANUP_INTERVAL_SECONDS=60 * 60
+BRAVE_SEARCH_MAX_RPS=50
+
 TRACKING_QUERY_PREFIXES=("utm_",)
 TRACKING_QUERY_KEYS={
     "fbclid",
@@ -123,11 +135,14 @@ OPTIONAL_DEPENDENCIES={
 VALID_ENGINES=("brave", "perplexity", "both", "fetch", "llm-context")
 _cache_lock = threading.Lock()
 _semantic_index_lock = threading.Lock()
+_cache_cleanup_lock = threading.Lock()
+_brave_rate_limit_thread_lock = threading.Lock()
+_last_cache_cleanup_at=0.0
 
 ENGINE_DETAILS={
     "brave": {
         "description": "Brave Web Search",
-        "requires": "BRAVE_API_KEY",
+        "requires": "BRAVE_SEARCH_API_KEY or BRAVE_API_KEY",
         "category": "search",
         "supports_offset": True,
         "supports_semantic_cache": True,
@@ -147,7 +162,7 @@ ENGINE_DETAILS={
     },
     "both": {
         "description": "Brave + Perplexity combined",
-        "requires": "BRAVE_API_KEY + OPENROUTER_API_KEY",
+        "requires": "(BRAVE_SEARCH_API_KEY or BRAVE_API_KEY) + OPENROUTER_API_KEY",
         "category": "hybrid",
         "supports_offset": True,
         "supports_semantic_cache": True,
@@ -220,13 +235,113 @@ def get_cache_key(query, engine, offset):
     key_string = f"{normalized_query}_{engine}_{offset}"
     return hashlib.md5(key_string.encode('utf-8')).hexdigest() + ".json"
 
+def _cache_result_filename(name):
+    """Return whether a filename is one of ccsearch's hashed result files."""
+    return bool(re.fullmatch(r"[0-9a-f]{32}\.json", str(name or "")))
+
+@contextmanager
+def _locked_runtime_file(path):
+    """Open and exclusively lock a small cross-process runtime state file."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd=os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield handle
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+def _cache_operations_lock_path():
+    return os.path.join(get_cache_dir(), "cache_operations.lock")
+
+def _cache_file_age(cache_file, now=None):
+    current_time=time.time() if now is None else now
+    return max(0.0, current_time - os.path.getmtime(cache_file))
+
+def _delete_cache_file_if_retained_too_long(cache_file, now=None):
+    """Delete one result file if it has reached the day-91 retention boundary."""
+    current_time=time.time() if now is None else now
+    with _cache_lock:
+        try:
+            with _locked_runtime_file(_cache_operations_lock_path()):
+                if (
+                    os.path.exists(cache_file)
+                    and _cache_file_age(cache_file, current_time) >= CACHE_DELETE_AGE_SECONDS
+                ):
+                    os.unlink(cache_file)
+                    return True
+        except OSError:
+            return False
+    return False
+
+def _prune_semantic_index_orphans():
+    """Remove semantic entries whose corresponding result file no longer exists."""
+    with _semantic_index_lock:
+        index=_load_semantic_index()
+        if not index:
+            return 0
+        cache_dir=get_cache_dir()
+        retained={
+            key: meta for key, meta in index.items()
+            if os.path.exists(os.path.join(cache_dir, key + ".json"))
+        }
+        removed=len(index) - len(retained)
+        if removed:
+            _save_semantic_index(retained)
+        return removed
+
+def prune_cache(now=None, force=False):
+    """Delete result files beginning on day 91 and prune semantic-index orphans.
+
+    Normal calls scan at most once per hour per process. ``force=True`` is used
+    by the maintenance CLI/timer and tests.
+    """
+    global _last_cache_cleanup_at
+    current_time=time.time() if now is None else now
+    with _cache_cleanup_lock:
+        if not force and current_time - _last_cache_cleanup_at < CACHE_CLEANUP_INTERVAL_SECONDS:
+            return {"deleted_files": 0, "pruned_index_entries": 0, "errors": 0, "skipped": True}
+        _last_cache_cleanup_at=current_time
+
+    cache_dir=get_cache_dir()
+    deleted=0
+    errors=0
+    with _cache_lock:
+        try:
+            with _locked_runtime_file(_cache_operations_lock_path()):
+                for entry in os.scandir(cache_dir):
+                    if not entry.is_file(follow_symlinks=False) or not _cache_result_filename(entry.name):
+                        continue
+                    try:
+                        if _cache_file_age(entry.path, current_time) >= CACHE_DELETE_AGE_SECONDS:
+                            os.unlink(entry.path)
+                            deleted+=1
+                    except OSError:
+                        errors+=1
+        except OSError:
+            errors+=1
+
+    pruned=_prune_semantic_index_orphans()
+    return {"deleted_files": deleted, "pruned_index_entries": pruned, "errors": errors, "skipped": False}
+
 def read_from_cache(query, engine, offset, ttl_minutes):
+    prune_cache()
     cache_file = os.path.join(get_cache_dir(), get_cache_key(query, engine, offset))
     if not os.path.exists(cache_file):
         return None
 
-    file_age = time.time() - os.path.getmtime(cache_file)
-    if file_age > (ttl_minutes * 60):
+    try:
+        file_age = _cache_file_age(cache_file)
+    except OSError:
+        return None
+    effective_ttl_seconds=min(ttl_minutes * 60, CACHE_MAX_READ_AGE_SECONDS)
+    if file_age >= CACHE_DELETE_AGE_SECONDS:
+        _delete_cache_file_if_retained_too_long(cache_file)
+        _prune_semantic_index_orphans()
+        return None
+    if file_age > effective_ttl_seconds:
         return None # Cache expired
 
     try:
@@ -239,18 +354,20 @@ def read_from_cache(query, engine, offset, ttl_minutes):
         return None # Return None if cache file is corrupted
 
 def write_to_cache(query, engine, offset, result):
+    prune_cache()
     cache_file = os.path.join(get_cache_dir(), get_cache_key(query, engine, offset))
     try:
         with _cache_lock:
-            target_dir = os.path.dirname(cache_file) or get_cache_dir()
-            fd, temp_path = tempfile.mkstemp(prefix="cache-", suffix=".json", dir=target_dir)
-            try:
-                with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, ensure_ascii=False)
-                os.replace(temp_path, cache_file)
-            finally:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
+            with _locked_runtime_file(_cache_operations_lock_path()):
+                target_dir = os.path.dirname(cache_file) or get_cache_dir()
+                fd, temp_path = tempfile.mkstemp(prefix="cache-", suffix=".json", dir=target_dir)
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                        json.dump(result, f, ensure_ascii=False)
+                    os.replace(temp_path, cache_file)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
     except Exception as e:
         sys.stderr.write(f"Warning: Failed to write to cache: {e}\n")
 
@@ -331,6 +448,7 @@ def _save_semantic_index(index):
 
 def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
     """Return (cached_result, similarity) or (None, 0.0) when no semantic match found."""
+    prune_cache()
     index = _load_semantic_index()
     if not index:
         return None, 0.0
@@ -341,13 +459,24 @@ def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
 
     best_key, best_sim = None, -1.0
     cache_dir = get_cache_dir()
+    deleted_stale_entry=False
     for key, meta in index.items():
         if meta.get("engine") != engine or meta.get("offset") != offset:
             continue
         cache_file = os.path.join(cache_dir, key + ".json")
         if not os.path.exists(cache_file):
             continue
-        if time.time() - os.path.getmtime(cache_file) > ttl_minutes * 60:
+        try:
+            file_age=_cache_file_age(cache_file)
+        except OSError:
+            continue
+        if file_age >= CACHE_DELETE_AGE_SECONDS:
+            deleted_stale_entry = (
+                _delete_cache_file_if_retained_too_long(cache_file)
+                or deleted_stale_entry
+            )
+            continue
+        if file_age > min(ttl_minutes * 60, CACHE_MAX_READ_AGE_SECONDS):
             continue
         emb = meta.get("embedding")
         if not emb:
@@ -355,6 +484,9 @@ def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
         sim = _cosine_sim(q_emb, emb)
         if sim > best_sim:
             best_sim, best_key = sim, key
+
+    if deleted_stale_entry:
+        _prune_semantic_index_orphans()
 
     if best_key and best_sim >= threshold:
         cache_file = os.path.join(cache_dir, best_key + ".json")
@@ -380,10 +512,53 @@ def update_semantic_index(query, engine, offset, cache_key_filename):
 
 # ---------------------------------------------------------------------------
 
-def retry_request(method, url, max_retries, **kwargs):
+def _brave_rate_limit_path():
+    return os.path.join(get_cache_dir(), "brave_subscription_rate_limit.json")
+
+def _brave_requests_per_second(config):
+    """Return the configured Brave rate capped at the Search plan's 50 RPS."""
+    try:
+        requested=config.getfloat('Brave', 'requests_per_second', fallback=1.0)
+    except (ValueError, configparser.Error):
+        requested=1.0
+    if requested <= 0:
+        requested=1.0
+    return max(1, min(BRAVE_SEARCH_MAX_RPS, int(requested)))
+
+def _wait_for_brave_rate_limit(config, now_fn=time.time, sleep_fn=time.sleep):
+    """Acquire one Brave request slot shared by local CLI/API/MCP processes."""
+    capacity=_brave_requests_per_second(config)
+    state_path=_brave_rate_limit_path()
+    with _brave_rate_limit_thread_lock:
+        with _locked_runtime_file(state_path) as state_file:
+            while True:
+                now=now_fn()
+                state_file.seek(0)
+                try:
+                    payload=json.load(state_file)
+                    timestamps=payload.get("timestamps", []) if isinstance(payload, dict) else []
+                except (json.JSONDecodeError, OSError, ValueError):
+                    timestamps=[]
+                timestamps=[
+                    float(ts) for ts in timestamps
+                    if isinstance(ts, (int, float)) and 0 <= now - float(ts) < 1.0
+                ]
+                if len(timestamps) < capacity:
+                    timestamps.append(now)
+                    state_file.seek(0)
+                    state_file.truncate()
+                    json.dump({"timestamps": timestamps}, state_file)
+                    state_file.flush()
+                    return
+                sleep_for=max(0.001, timestamps[0] + 1.0 - now)
+                sleep_fn(sleep_for)
+
+def retry_request(method, url, max_retries, before_attempt=None, **kwargs):
     """Request wrapper with a simple Exponential Backoff mechanism"""
     for attempt in range(max_retries + 1):
         try:
+            if before_attempt is not None:
+                before_attempt()
             if method.upper() == 'GET':
                 response = requests.get(url, **kwargs)
             else:
@@ -636,13 +811,12 @@ def perform_brave_search(query, api_key, config, offset=None):
     if offset is not None:
         params['offset'] = offset
 
-    # Handle rate limiting
-    rps = config.getfloat('Brave', 'requests_per_second', fallback=1.0)
-    if rps > 0:
-        time.sleep(1.0 / rps)
-
     max_retries = config.getint('Brave', 'max_retries', fallback=2)
-    response = retry_request('GET', url, max_retries, headers=headers, params=params, timeout=(10, 30))
+    response = retry_request(
+        'GET', url, max_retries,
+        before_attempt=lambda: _wait_for_brave_rate_limit(config),
+        headers=headers, params=params, timeout=(10, 30),
+    )
     data = response.json()
 
     results = []
@@ -824,13 +998,12 @@ def perform_llm_context_search(query, api_key, config):
     if freshness in ['pd', 'pw', 'pm', 'py']:
         params['freshness'] = freshness
 
-    # Reuse Brave rate limiting since it's the same API key / subscription
-    rps = config.getfloat('Brave', 'requests_per_second', fallback=1.0)
-    if rps > 0:
-        time.sleep(1.0 / rps)
-
     max_retries = config.getint('LLMContext', 'max_retries', fallback=2)
-    response = retry_request('GET', url, max_retries, headers=headers, params=params, timeout=(10, 30))
+    response = retry_request(
+        'GET', url, max_retries,
+        before_attempt=lambda: _wait_for_brave_rate_limit(config),
+        headers=headers, params=params, timeout=(10, 30),
+    )
     data = response.json()
 
     grounding = data.get("grounding", {})
@@ -2096,18 +2269,33 @@ def list_engines():
 def _engine_required_env_vars(engine):
     """Return environment variables that can satisfy an engine."""
     requirements={
-        "brave": ["BRAVE_API_KEY"],
+        "brave": ["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"],
         "perplexity": ["OPENROUTER_API_KEY"],
-        "both": ["BRAVE_API_KEY", "OPENROUTER_API_KEY"],
+        "both": ["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY", "OPENROUTER_API_KEY"],
         "llm-context": ["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"],
         "fetch": [],
     }
     return requirements.get(engine, [])
 
+def _resolve_brave_api_key():
+    """Return the preferred Brave key and its environment variable name."""
+    for env_name in ("BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"):
+        api_key=os.environ.get(env_name, "").strip()
+        if api_key:
+            return api_key, env_name
+    return None, None
+
 def _engine_configured_via(engine):
     """Return the active environment variable(s) satisfying an engine."""
     if engine == "fetch":
         return "built-in"
+    if engine in ("brave", "llm-context", "both"):
+        _, brave_env_name=_resolve_brave_api_key()
+        if not brave_env_name:
+            return None
+        if engine == "both":
+            return f"{brave_env_name} + OPENROUTER_API_KEY" if os.environ.get("OPENROUTER_API_KEY") else None
+        return brave_env_name
     required=_engine_required_env_vars(engine)
     if engine == "both":
         if all(os.environ.get(name) for name in required):
@@ -2134,6 +2322,16 @@ def get_diagnostics(config=None, include_engines=True):
         }
     diagnostics = {
         "cache_dir": get_cache_dir(),
+        "cache": {
+            "default_ttl_minutes": DEFAULT_CACHE_TTL_MINUTES,
+            "max_read_age_days": CACHE_MAX_READ_AGE_SECONDS // 86400,
+            "delete_age_days": CACHE_DELETE_AGE_SECONDS // 86400,
+        },
+        "brave_rate_limit": {
+            "configured_rps": _brave_requests_per_second(fetch_config),
+            "subscription_cap_rps": BRAVE_SEARCH_MAX_RPS,
+            "shared_across_local_processes": fcntl is not None,
+        },
         "dependencies": dependencies,
         "environment": {
             "BRAVE_API_KEY": bool(os.environ.get("BRAVE_API_KEY")),
@@ -2161,7 +2359,7 @@ def validate_query(query, engine):
         return "For fetch engine, query must be a valid HTTP or HTTPS URL."
     return None
 
-def validate_execution_options(engine, offset=None, cache_ttl=10, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
+def validate_execution_options(engine, offset=None, cache_ttl=DEFAULT_CACHE_TTL_MINUTES, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
     """Validate shared execution options. Returns an error message or None."""
     if offset is not None and engine not in {"brave", "both"}:
         return "The 'offset' option is only supported for brave and both engines."
@@ -2171,6 +2369,8 @@ def validate_execution_options(engine, offset=None, cache_ttl=10, semantic_thres
         return "The 'flaresolverr' option is only supported for the fetch engine."
     if cache_ttl <= 0:
         return "'cache_ttl' must be greater than 0."
+    if cache_ttl > DEFAULT_CACHE_TTL_MINUTES:
+        return f"'cache_ttl' cannot exceed {DEFAULT_CACHE_TTL_MINUTES} minutes (90 days)."
     if not 0.0 <= semantic_threshold <= 1.0:
         return "'semantic_threshold' must be between 0.0 and 1.0."
     if result_limit is not None:
@@ -2300,7 +2500,7 @@ def execute_batch(requests_payload, config, defaults=None, max_workers=None):
             "query": _coerce_batch_query(entry),
             "offset": entry.get("offset", defaults.get("offset")),
             "cache": entry.get("cache", defaults.get("cache", False)),
-            "cache_ttl": entry.get("cache_ttl", defaults.get("cache_ttl", 10)),
+            "cache_ttl": entry.get("cache_ttl", defaults.get("cache_ttl", DEFAULT_CACHE_TTL_MINUTES)),
             "semantic_cache": entry.get("semantic_cache", defaults.get("semantic_cache", False)),
             "semantic_threshold": entry.get("semantic_threshold", defaults.get("semantic_threshold", 0.9)),
             "flaresolverr": entry.get("flaresolverr", defaults.get("flaresolverr", False)),
@@ -2458,9 +2658,9 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
         raise ValueError(error)
 
     if engine == "brave":
-        api_key = os.environ.get("BRAVE_API_KEY")
+        api_key, _ = _resolve_brave_api_key()
         if not api_key:
-            raise RuntimeError("BRAVE_API_KEY environment variable not found.")
+            raise RuntimeError("BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY fallback) environment variable not found.")
         return perform_brave_search(query, api_key, config, offset=offset)
 
     if engine == "perplexity":
@@ -2470,16 +2670,16 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
         return perform_perplexity_search(query, api_key, config)
 
     if engine == "both":
-        brave_api_key = os.environ.get("BRAVE_API_KEY")
+        brave_api_key, _ = _resolve_brave_api_key()
         perplexity_api_key = os.environ.get("OPENROUTER_API_KEY")
         if not brave_api_key or not perplexity_api_key:
-            raise RuntimeError("Both BRAVE_API_KEY and OPENROUTER_API_KEY are required for 'both' engine.")
+            raise RuntimeError("A Brave key (BRAVE_SEARCH_API_KEY preferred, BRAVE_API_KEY fallback) and OPENROUTER_API_KEY are required for 'both' engine.")
         return perform_both_search(query, brave_api_key, perplexity_api_key, config, offset=offset)
 
     if engine == "llm-context":
-        api_key = os.environ.get("BRAVE_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
+        api_key, _ = _resolve_brave_api_key()
         if not api_key:
-            raise RuntimeError("BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY) environment variable not found.")
+            raise RuntimeError("BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY fallback) environment variable not found.")
         return perform_llm_context_search(query, api_key, config)
 
     fetch_config = config
@@ -2489,9 +2689,10 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
         fetch_config.set('Fetch', 'flaresolverr_mode', 'always')
     return perform_fetch(query, fetch_config)
 
-def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=10, semantic_cache=False, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
+def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=DEFAULT_CACHE_TTL_MINUTES, semantic_cache=False, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
     """Run a query through cache + engine execution and return a structured result."""
     started=time.time()
+    prune_cache()
     normalized_include=_normalize_host_filters(include_hosts)
     normalized_exclude=_normalize_host_filters(exclude_hosts)
     option_error = validate_execution_options(
@@ -2539,21 +2740,22 @@ def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=10,
     return result
 
 def main():
-    parser = argparse.ArgumentParser(description="Web Search Utility for LLMs using Brave or Perplexity.")
+    parser = argparse.ArgumentParser(description="Search, context retrieval, and URL fetch utility for humans and LLMs.")
     parser.add_argument("query", nargs="?", help="The search query, keyword, or URL (for fetch engine)")
     parser.add_argument("-e", "--engine", choices=list(VALID_ENGINES), required=False, help="Search engine to use (brave, perplexity, both, fetch, or llm-context)")
     parser.add_argument("-c", "--config", default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), help="Path to config INI file")
     parser.add_argument("--batch-file", help="Path to a JSON/JSONL batch file containing multiple requests")
     parser.add_argument("--format", choices=["json", "text"], default="json", help="Output format: json or text")
-    parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for Brave search only)")
+    parser.add_argument("--offset", type=int, default=None, help="Pagination offset (for brave and both engines)")
     parser.add_argument("--limit", type=int, default=None, help="Limit returned results for brave, both, and llm-context")
     parser.add_argument("--cache", action="store_true", help="Enable results caching")
-    parser.add_argument("--cache-ttl", type=int, default=10, help="Cache Time-To-Live in minutes (default: 10)")
+    parser.add_argument("--cache-ttl", type=int, default=DEFAULT_CACHE_TTL_MINUTES, help=f"Cache Time-To-Live in minutes (default/max: {DEFAULT_CACHE_TTL_MINUTES}, 90 days)")
     parser.add_argument("--semantic-cache", action="store_true", help="Enable semantic similarity cache via fastembed (implies --cache)")
     parser.add_argument("--semantic-threshold", type=float, default=0.9, help="Cosine similarity threshold for semantic cache (default: 0.9)")
     parser.add_argument("--flaresolverr", action="store_true", help="Force FlareSolverr mode for fetch engine (overrides config flaresolverr_mode to 'always')")
     parser.add_argument("--list-engines", action="store_true", help="List available engines and their configured status")
     parser.add_argument("--doctor", action="store_true", help="Show runtime diagnostics and dependency status")
+    parser.add_argument("--prune-cache", action="store_true", help="Delete cache entries that have reached day 91")
     parser.add_argument("--batch-workers", type=int, default=None, help="Maximum concurrent workers for --batch-file execution")
     parser.add_argument("--include-host", action="append", default=[], help="Restrict brave/both/llm-context results to these hostnames (repeatable or comma-separated)")
     parser.add_argument("--exclude-host", action="append", default=[], help="Exclude brave/both/llm-context results from these hostnames (repeatable or comma-separated)")
@@ -2562,6 +2764,18 @@ def main():
     config = load_config(args.config)
 
     try:
+        if args.prune_cache:
+            payload=prune_cache(force=True)
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    f"Cache cleanup: {payload['deleted_files']} file(s) deleted, "
+                    f"{payload['pruned_index_entries']} semantic index entry/entries pruned, "
+                    f"{payload['errors']} error(s)."
+                )
+            return
+
         if args.list_engines:
             payload={"engines": list_engines()}
             if args.format == "json":
@@ -2629,7 +2843,7 @@ def main():
             cli_default_values = {
                 "engine": "brave",
                 "cache": False,
-                "cache_ttl": 10,
+                "cache_ttl": DEFAULT_CACHE_TTL_MINUTES,
                 "semantic_cache": False,
                 "semantic_threshold": 0.9,
                 "offset": None,

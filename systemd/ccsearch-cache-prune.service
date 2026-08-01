@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune ccsearch cache entries beginning on day 91
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=jamie
+Group=jamie
+WorkingDirectory=/home/jamie/ccsearch
+ExecStart=/usr/bin/python3 /home/jamie/ccsearch/ccsearch.py --prune-cache --format json

@@ -22,7 +22,7 @@ The API key is read from the `CCSEARCH_API_KEY` environment variable. Pass it in
 Before using this skill, you must configure your API base URL and key:
 
 1. Set the base URL to point to your self-hosted ccsearch server:
-   - Edit the `BASE_URL` placeholder below to match your deployment (e.g., `https://ccsearch.example.com`)
+   - Replace the `YOUR_CCSEARCH_BASE_URL` placeholder below with your deployment (e.g., `https://ccsearch.example.com`)
 2. Set the API key environment variable:
    ```bash
    export CCSEARCH_API_KEY="your_api_key"
@@ -43,7 +43,7 @@ Base URL: `YOUR_CCSEARCH_BASE_URL`
 curl -s YOUR_CCSEARCH_BASE_URL/health
 ```
 
-No authentication required. Returns `{"status": "ok"}`.
+No authentication required. Returns `{"status":"ok","service":"ccsearch-api"}`.
 
 ### List Engines
 
@@ -68,10 +68,10 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 | `query` | string | Yes | Search query, or URL when using `fetch` engine |
 | `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, `llm-context` |
 | `cache` | bool | No | Enable server-side caching |
-| `cache_ttl` | int | No | Cache TTL in minutes |
+| `cache_ttl` | int | No | Cache freshness in minutes (default/max `129600`, or 90 days) |
 | `semantic_cache` | bool | No | Enable semantic similarity cache |
 | `semantic_threshold` | float | No | Semantic cache similarity threshold |
-| `offset` | int | No | Pagination offset (brave only) |
+| `offset` | int | No | Pagination offset (`brave` and `both` only) |
 | `result_limit` | int | No | Trim returned results for `brave`, `both`, `llm-context` |
 | `flaresolverr` | bool | No | Force FlareSolverr proxy (fetch only) |
 | `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, `llm-context` |
@@ -272,13 +272,13 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 
 ## Error Handling
 
-Non-200 responses return `{"error": "message"}`. Common cases:
+Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 
 | Status | Meaning |
 |--------|---------|
 | 401 | Missing or invalid API key |
 | 400 | Bad request (missing query/engine, invalid URL for fetch, unsupported option combinations) |
-| 502 | Upstream API error (Brave/Perplexity/target site down) |
+| 500 | Server or upstream failure (`Server Error`, `Search Failed`, or `Batch Failed`) |
 
 ## Important Notes
 
@@ -291,4 +291,6 @@ Non-200 responses return `{"error": "message"}`. Common cases:
 - Use `/diagnostics` or `/engines` when a request fails and you need to check whether dependencies or engine capabilities are available server-side.
 - Use `/batch` when you have several independent lookups/fetches and want one network round-trip.
 - The server handles all API keys, rate limits, and caching internally.
+- Server-side Brave engines prefer `BRAVE_SEARCH_API_KEY`, fall back to `BRAVE_API_KEY` only when needed, and share one local subscription limiter capped at 50 RPS.
+- Cached results can be read for at most 90 days. Beginning on day 91, result files and orphaned semantic-index entries are deleted by server maintenance.
 - ccsearch best practice: brave first → fetch original pages → multiple keyword angles → llm-context for long docs → perplexity last as sanity check only. Never use perplexity as primary because perplexity tends to hallucinate more than other engines.

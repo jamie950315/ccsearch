@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly ccsearch cache retention enforcement
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=5min
+Persistent=true
+Unit=ccsearch-cache-prune.service
+
+[Install]
+WantedBy=timers.target

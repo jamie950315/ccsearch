@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""
-Comprehensive tests for ccsearch.py — every function, every code path.
-Run: python3 -m pytest test_ccsearch.py -v
+"""Unit and regression tests for the ccsearch core, HTTP wrapper, and MCP tools.
+
+Run: python3 -m unittest -v test_ccsearch.py
+
+Live transports, systemd, Docker, Cloudflare Tunnel, and real upstream services
+require separate smoke or integration checks.
 """
 import os
 import sys
@@ -229,6 +232,52 @@ class TestReadWriteCache(unittest.TestCase):
         os.utime(cache_file, (old_time, old_time))
         self.assertIsNone(ccsearch.read_from_cache('q', 'brave', 0, ttl_minutes=10))
 
+    def test_default_policy_reads_cache_through_90_days(self):
+        data = {"engine": "brave", "results": ["cached"]}
+        ccsearch.write_to_cache('q', 'brave', 0, data)
+        cache_file = os.path.join(self.tmpdir, ccsearch.get_cache_key('q', 'brave', 0))
+        old_time = time.time() - ccsearch.CACHE_MAX_READ_AGE_SECONDS + 1
+        os.utime(cache_file, (old_time, old_time))
+        self.assertEqual(
+            ccsearch.read_from_cache(
+                'q', 'brave', 0, ttl_minutes=ccsearch.DEFAULT_CACHE_TTL_MINUTES
+            ),
+            data,
+        )
+
+    def test_cache_older_than_90_days_is_not_read_but_kept_until_day_91(self):
+        ccsearch.write_to_cache('q', 'brave', 0, {"x": 1})
+        cache_file = os.path.join(self.tmpdir, ccsearch.get_cache_key('q', 'brave', 0))
+        old_time = time.time() - ccsearch.CACHE_MAX_READ_AGE_SECONDS - 5
+        os.utime(cache_file, (old_time, old_time))
+        self.assertIsNone(
+            ccsearch.read_from_cache(
+                'q', 'brave', 0, ttl_minutes=ccsearch.DEFAULT_CACHE_TTL_MINUTES
+            )
+        )
+        self.assertTrue(os.path.exists(cache_file))
+
+    def test_cache_is_deleted_beginning_on_day_91(self):
+        ccsearch.write_to_cache('q', 'brave', 0, {"x": 1})
+        cache_file = os.path.join(self.tmpdir, ccsearch.get_cache_key('q', 'brave', 0))
+        old_time = time.time() - ccsearch.CACHE_DELETE_AGE_SECONDS - 1
+        os.utime(cache_file, (old_time, old_time))
+        ccsearch.prune_cache(force=True)
+        self.assertFalse(os.path.exists(cache_file))
+
+    def test_prune_cache_ignores_non_result_json_and_lock_files(self):
+        old_time = time.time() - ccsearch.CACHE_DELETE_AGE_SECONDS - 1
+        protected = ["semantic_index.json", "brave_subscription_rate_limit.json", "cache-temp.json"]
+        for name in protected:
+            path = os.path.join(self.tmpdir, name)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({}, handle)
+            os.utime(path, (old_time, old_time))
+        result=ccsearch.prune_cache(force=True)
+        self.assertEqual(result["deleted_files"], 0)
+        for name in protected:
+            self.assertTrue(os.path.exists(os.path.join(self.tmpdir, name)))
+
     def test_corrupted_cache_returns_none(self):
         cache_file = os.path.join(self.tmpdir, ccsearch.get_cache_key('q', 'brave', 0))
         with open(cache_file, 'w') as f:
@@ -384,6 +433,83 @@ class TestRetryRequest(unittest.TestCase):
         # Sleeps: 2^0=1, 2^1=2, 2^2=4
         mock_sleep.assert_has_calls([call(1), call(2), call(4)])
 
+    @patch('ccsearch.time.sleep')
+    @patch('ccsearch.requests.get')
+    def test_before_attempt_runs_for_initial_request_and_every_retry(self, mock_get, mock_sleep):
+        mock_get.side_effect = [
+            requests.exceptions.Timeout("timeout"),
+            _mock_response(200, text='ok'),
+        ]
+        before_attempt=MagicMock()
+        ccsearch.retry_request('GET', 'http://x', 1, before_attempt=before_attempt)
+        self.assertEqual(before_attempt.call_count, 2)
+
+
+class TestBraveSubscriptionRateLimit(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir=tempfile.mkdtemp()
+        self.cache_patch=patch('ccsearch.get_cache_dir', return_value=self.tmpdir)
+        self.cache_patch.start()
+
+    def tearDown(self):
+        self.cache_patch.stop()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_config_is_capped_at_search_subscription_50_rps(self):
+        config=_make_config()
+        config.set('Brave', 'requests_per_second', '500')
+        self.assertEqual(ccsearch._brave_requests_per_second(config), 50)
+
+    def test_web_and_llm_context_share_one_state_file(self):
+        config=_make_config()
+        config.set('Brave', 'requests_per_second', '2')
+        clock=[100.0]
+        sleeps=[]
+        def now_fn():
+            return clock[0]
+        def sleep_fn(seconds):
+            sleeps.append(seconds)
+            clock[0]+=seconds
+
+        ccsearch._wait_for_brave_rate_limit(config, now_fn=now_fn, sleep_fn=sleep_fn)
+        ccsearch._wait_for_brave_rate_limit(config, now_fn=now_fn, sleep_fn=sleep_fn)
+        ccsearch._wait_for_brave_rate_limit(config, now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 1.0)
+
+    def test_corrupt_state_recovers(self):
+        with open(ccsearch._brave_rate_limit_path(), 'w', encoding='utf-8') as handle:
+            handle.write('{not json')
+        ccsearch._wait_for_brave_rate_limit(
+            _make_config(), now_fn=lambda: 100.0, sleep_fn=lambda _: None
+        )
+        with open(ccsearch._brave_rate_limit_path(), encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)["timestamps"], [100.0])
+
+    @unittest.skipIf(ccsearch.fcntl is None, "cross-process file locking requires fcntl")
+    def test_two_processes_share_the_same_50_rps_window(self):
+        import multiprocessing
+
+        def worker(cache_dir):
+            ccsearch.get_cache_dir=lambda: cache_dir
+            config=_make_config()
+            config.set('Brave', 'requests_per_second', '50')
+            for _ in range(26):
+                ccsearch._wait_for_brave_rate_limit(config)
+
+        context=multiprocessing.get_context('fork')
+        processes=[context.Process(target=worker, args=(self.tmpdir,)) for _ in range(2)]
+        started=time.time()
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(5)
+        elapsed=time.time() - started
+        self.assertTrue(all(process.exitcode == 0 for process in processes))
+        self.assertGreaterEqual(elapsed, 0.75)
+
 
 # ===========================================================================
 # 4. perform_brave_search
@@ -511,14 +637,16 @@ class TestPerformBraveSearch(unittest.TestCase):
         ccsearch.perform_brave_search("test", "key", config)
         self.assertNotIn('safesearch', mock_req.call_args.kwargs['params'])
 
-    @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
-    def test_rate_limiting_sleep(self, mock_req, mock_sleep):
+    def test_rate_limiting_callback(self, mock_req):
         mock_req.return_value = _mock_response(json_data={"web": {"results": []}})
         config = self._default_config()
         config.set('Brave', 'requests_per_second', '2')
         ccsearch.perform_brave_search("test", "key", config)
-        mock_sleep.assert_called_once_with(0.5)
+        callback=mock_req.call_args.kwargs['before_attempt']
+        with patch('ccsearch._wait_for_brave_rate_limit') as mock_wait:
+            callback()
+        mock_wait.assert_called_once_with(config)
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -924,14 +1052,16 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         ccsearch.perform_llm_context_search("test", "key", config)
         self.assertNotIn('freshness', mock_req.call_args.kwargs['params'])
 
-    @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
-    def test_rate_limiting_uses_brave_rps(self, mock_req, mock_sleep):
+    def test_rate_limiting_uses_shared_brave_callback(self, mock_req):
         mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
         config = self._default_config()
         config.set('Brave', 'requests_per_second', '2')
         ccsearch.perform_llm_context_search("test", "key", config)
-        mock_sleep.assert_called_once_with(0.5)
+        callback=mock_req.call_args.kwargs['before_attempt']
+        with patch('ccsearch._wait_for_brave_rate_limit') as mock_wait:
+            callback()
+        mock_wait.assert_called_once_with(config)
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -2392,13 +2522,41 @@ class TestSharedExecutionHelpers(unittest.TestCase):
         self.assertEqual(fetch_engine["required_env_vars"], [])
 
     def test_list_engines_marks_brave_as_configured_when_env_present(self):
-        with patch.dict(os.environ, {"BRAVE_API_KEY": "x"}, clear=False):
+        with patch.dict(os.environ, {"BRAVE_API_KEY": "x"}, clear=True):
             engines = ccsearch.list_engines()
         brave_engine = next(item for item in engines if item["name"] == "brave")
         self.assertTrue(brave_engine["configured"])
         self.assertEqual(brave_engine["configured_via"], "BRAVE_API_KEY")
         self.assertTrue(brave_engine["supports_host_filter"])
         self.assertTrue(brave_engine["supports_result_limit"])
+
+    def test_list_engines_prefers_search_key_for_all_brave_backed_engines(self):
+        env={
+            "BRAVE_SEARCH_API_KEY": "search",
+            "BRAVE_API_KEY": "legacy",
+            "OPENROUTER_API_KEY": "openrouter",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            engines={item["name"]: item for item in ccsearch.list_engines()}
+        self.assertEqual(engines["brave"]["configured_via"], "BRAVE_SEARCH_API_KEY")
+        self.assertEqual(engines["llm-context"]["configured_via"], "BRAVE_SEARCH_API_KEY")
+        self.assertEqual(
+            engines["both"]["configured_via"],
+            "BRAVE_SEARCH_API_KEY + OPENROUTER_API_KEY",
+        )
+
+    def test_resolve_brave_key_falls_back_only_when_search_key_is_missing(self):
+        with patch.dict(os.environ, {"BRAVE_API_KEY": "legacy"}, clear=True):
+            self.assertEqual(ccsearch._resolve_brave_api_key(), ("legacy", "BRAVE_API_KEY"))
+        with patch.dict(
+            os.environ,
+            {"BRAVE_SEARCH_API_KEY": "search", "BRAVE_API_KEY": "legacy"},
+            clear=True,
+        ):
+            self.assertEqual(
+                ccsearch._resolve_brave_api_key(),
+                ("search", "BRAVE_SEARCH_API_KEY"),
+            )
 
     def test_get_diagnostics_reports_dependency_and_fetch_state(self):
         config = _make_config(flaresolverr_url='http://fs:8191/v1', flaresolverr_mode='always')
@@ -2431,6 +2589,14 @@ class TestSharedExecutionHelpers(unittest.TestCase):
     def test_validate_execution_options_rejects_invalid_cache_ttl(self):
         self.assertIn("cache_ttl", ccsearch.validate_execution_options('fetch', cache_ttl=0))
 
+    def test_validate_execution_options_rejects_cache_ttl_over_90_days(self):
+        self.assertIn(
+            "90 days",
+            ccsearch.validate_execution_options(
+                'fetch', cache_ttl=ccsearch.DEFAULT_CACHE_TTL_MINUTES + 1
+            ),
+        )
+
     def test_validate_execution_options_rejects_invalid_semantic_threshold(self):
         self.assertIn("semantic_threshold", ccsearch.validate_execution_options('brave', semantic_threshold=1.5))
 
@@ -2459,6 +2625,34 @@ class TestSharedExecutionHelpers(unittest.TestCase):
         with patch.dict(os.environ, {'BRAVE_API_KEY': 'only-brave'}, clear=True):
             with self.assertRaises(RuntimeError):
                 ccsearch.execute_engine('test', 'both', self.config)
+
+    @patch('ccsearch.perform_brave_search')
+    def test_execute_engine_brave_prefers_search_key(self, mock_brave):
+        mock_brave.return_value={"engine": "brave", "results": []}
+        with patch.dict(
+            os.environ,
+            {'BRAVE_SEARCH_API_KEY': 'search', 'BRAVE_API_KEY': 'legacy'},
+            clear=True,
+        ):
+            ccsearch.execute_engine('test', 'brave', self.config)
+        mock_brave.assert_called_once_with('test', 'search', self.config, offset=None)
+
+    @patch('ccsearch.perform_both_search')
+    def test_execute_engine_both_prefers_search_key(self, mock_both):
+        mock_both.return_value={"engine": "both", "brave_results": []}
+        with patch.dict(
+            os.environ,
+            {
+                'BRAVE_SEARCH_API_KEY': 'search',
+                'BRAVE_API_KEY': 'legacy',
+                'OPENROUTER_API_KEY': 'openrouter',
+            },
+            clear=True,
+        ):
+            ccsearch.execute_engine('test', 'both', self.config)
+        mock_both.assert_called_once_with(
+            'test', 'search', 'openrouter', self.config, offset=None
+        )
 
     @patch('ccsearch.perform_llm_context_search')
     def test_execute_engine_llm_context_accepts_search_key(self, mock_lc):
@@ -3003,14 +3197,17 @@ class TestMainCLI(unittest.TestCase):
     # ---- Brave engine ----
 
     def test_brave_missing_api_key(self):
-        env_backup = os.environ.pop('BRAVE_API_KEY', None)
+        env_backup_s = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
+        env_backup_b = os.environ.pop('BRAVE_API_KEY', None)
         try:
             out, err, code = self._run_main(['test', '-e', 'brave'])
             self.assertEqual(code, 1)
-            self.assertIn("BRAVE_API_KEY", err)
+            self.assertIn("BRAVE_SEARCH_API_KEY", err)
         finally:
-            if env_backup:
-                os.environ['BRAVE_API_KEY'] = env_backup
+            if env_backup_s:
+                os.environ['BRAVE_SEARCH_API_KEY'] = env_backup_s
+            if env_backup_b:
+                os.environ['BRAVE_API_KEY'] = env_backup_b
 
     @patch('ccsearch.perform_brave_search')
     def test_brave_json_output(self, mock_bs):
@@ -3107,13 +3304,16 @@ class TestMainCLI(unittest.TestCase):
     # ---- Both engine ----
 
     def test_both_missing_keys(self):
+        env_backup_s = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
         env_backup_b = os.environ.pop('BRAVE_API_KEY', None)
         env_backup_p = os.environ.pop('OPENROUTER_API_KEY', None)
         try:
             out, err, code = self._run_main(['test', '-e', 'both'])
             self.assertEqual(code, 1)
-            self.assertIn("Both BRAVE_API_KEY and OPENROUTER_API_KEY", err)
+            self.assertIn("BRAVE_SEARCH_API_KEY preferred", err)
         finally:
+            if env_backup_s:
+                os.environ['BRAVE_SEARCH_API_KEY'] = env_backup_s
             if env_backup_b:
                 os.environ['BRAVE_API_KEY'] = env_backup_b
             if env_backup_p:

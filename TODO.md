@@ -34,12 +34,16 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 
 ## API / MCP / CLI
 
-- Add first-class examples for `/batch` and `/diagnostics` into the skill and any external integration templates that still lag behind.
+- Validate `fetch` inputs with parsed `http`/`https` schemes and a hostname; the current shared validator only checks the string prefix.
+- Coerce malformed batch option types per item so one bad `cache_ttl`, `semantic_threshold`, or `offset` value cannot abort the whole batch before per-request isolation applies.
+- Audit external integration templates for `/batch` and `/diagnostics`; both checked-in skill files already include first-class examples.
 - Consider adding a dedicated `result_format` or `compact` mode for lighter agent payloads.
 - Consider exposing an explicit chunk-focused fetch mode for agent workflows that do not need the full `content` body.
 
 ## Operations
 
+- Bind FlareSolverr to localhost instead of all interfaces, or add an equivalent firewall restriction. It has no authentication and is currently published by Docker on `0.0.0.0:8191` and `[::]:8191`.
+- Replace MCP URL-path authentication with a mechanism that does not place the shared API key in access logs, or add reliable access-log redaction across Uvicorn and Cloudflare.
 - Replace the Flask development server with a production WSGI/ASGI deployment setup.
   - Gunicorn/Uvicorn worker model
   - Clear service documentation for production mode
@@ -70,12 +74,7 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
   - self-hosted personal deployment
   - public Internet-facing deployment
 - Add an environment matrix documenting which optional dependencies unlock which features.
-- Add examples showing when to use:
-  - `brave`
-  - `llm-context`
-  - `both`
-  - `fetch`
-  - `batch`
+- Keep the existing engine-selection and batch examples synchronized across README and both checked-in skill variants.
 
 ## Nice-to-Have
 

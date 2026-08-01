@@ -33,10 +33,8 @@ The project now exposes a shared execution layer with:
 - Install dependencies with `pip install -r requirements.txt`
 - Copy `config.ini.example` to `config.ini`
 - Use `./ccsearch.py --help` for CLI flags
-- Optional extras:
-  - `fastembed` for semantic cache
-  - `markitdown[...]` for PDF / Office conversion in `fetch`
-  - `curl_cffi` for better anti-bot handling in direct fetches
+- The standard requirements currently install `fastembed` for semantic cache and `curl_cffi` for direct-fetch TLS impersonation. The code degrades gracefully if either is unavailable.
+- Optional extra: `markitdown[...]` for PDF / Office conversion in `fetch`.
 
 ## Testing And Verification
 
@@ -74,11 +72,15 @@ When relevant, also run the tool for real:
 
 Use and update shared helpers instead of re-implementing behavior in CLI, HTTP API, or MCP.
 
+Cache freshness defaults to 90 days and cannot exceed 90 days. A shorter caller-provided `cache_ttl` still expires a result earlier. Result files become unreadable after 90 days and are physically deleted beginning on day 91; `--prune-cache` and `ccsearch-cache-prune.timer` enforce cleanup, including semantic-index orphan removal.
+
 ### Search Engines
 
-- `brave` and `llm-context` use Brave APIs
+- `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY` and fall back to `BRAVE_API_KEY` only when the Search key is unset
 - `perplexity` uses OpenRouter
 - `both` runs Brave and Perplexity concurrently and preserves partial failures
+
+All Brave attempts, including retries, share a cross-process limiter capped at 50 RPS across the local CLI, HTTP API, and MCP services. The limiter cannot account for other devices using the same Brave subscription.
 
 Search-style engines normalize output for downstream agents:
 
@@ -119,7 +121,7 @@ Batch execution is implemented in shared core logic, not in the API layer.
 Features:
 
 - bounded parallelism via `max_workers`
-- per-request isolation
+- isolation of runtime failures and normally validated per-request errors
 - duplicate request suppression within the batch
 - stable output ordering
 - per-batch summary fields such as `success_count`, `error_count`, `duration_ms`, `deduped_count`
@@ -165,12 +167,18 @@ Current tools:
 
 The MCP server should stay thin and forward into shared execution logic.
 
-## Current Runtime Assumptions
+## Current Pi 5 Runtime
 
-- HTTP API default port: `8888`
-- MCP default port: `8890`
-- HTTP API auth: `X-API-Key`
-- MCP auth: path-based key prefix
+The dated, live-verified deployment snapshot and operational commands are in `AGENTS.md`. Re-check systemd, Docker, listeners, and Cloudflare configuration before treating it as current.
+
+- `ccsearch-api.service`: `/usr/bin/python3 api_server.py`, port `8888`, HTTP `X-API-Key` authentication except `/health`.
+- `ccsearch-mcp.service`: `/usr/bin/python3 mcp_server.py`, port `8890`, path-prefix authentication, SSE and Streamable HTTP.
+- `ccsearch-cache-prune.timer`: hourly cache cleanup for entries that have reached day 91.
+- Both units run as `jamie` from `/home/jamie/ccsearch` and systemd loads `.env` for them. The Python code does not load dotenv files for manual runs.
+- FlareSolverr runs in Docker on port `8191`; `cloudflared.service` publishes the API and MCP hostnames.
+- The HTTP process still uses Flask's built-in server, not a production WSGI/ASGI server.
+
+Never print authenticated MCP URLs or raw MCP access logs: the API key is part of the path and can appear in journals and proxy logs.
 
 ## Environment Variables
 
@@ -182,4 +190,4 @@ The MCP server should stay thin and forward into shared execution logic.
   - `CCSEARCH_PORT`
   - `CCSEARCH_MCP_PORT`
 
-`llm-context` prefers `BRAVE_SEARCH_API_KEY` and falls back to `BRAVE_API_KEY`.
+All Brave-backed engines prefer `BRAVE_SEARCH_API_KEY` and fall back to `BRAVE_API_KEY`. `both` additionally requires `OPENROUTER_API_KEY`.

@@ -23,6 +23,7 @@ from ccsearch import (
     validate_query,
     validate_execution_options,
     VALID_ENGINES,
+    DEFAULT_CACHE_TTL_MINUTES,
 )
 
 app = Flask(__name__)
@@ -67,7 +68,7 @@ def search():
       - query (str, required): search query or URL (for fetch engine)
       - engine (str, required): brave | perplexity | both | fetch | llm-context
       - cache (bool, optional): enable caching (default: false)
-      - cache_ttl (int, optional): cache TTL in minutes (default: 10)
+      - cache_ttl (int, optional): cache TTL in minutes (default/max: 129600, 90 days)
       - semantic_cache (bool, optional): enable semantic cache (default: false)
       - semantic_threshold (float, optional): cosine similarity threshold (default: 0.9)
       - offset (int, optional): pagination offset (brave only)
@@ -93,7 +94,7 @@ def search():
         }), 400
 
     use_cache = data.get("cache", False)
-    cache_ttl = data.get("cache_ttl", 10)
+    cache_ttl = data.get("cache_ttl", DEFAULT_CACHE_TTL_MINUTES)
     use_semantic = data.get("semantic_cache", False)
     semantic_threshold = data.get("semantic_threshold", 0.9)
     offset = data.get("offset")

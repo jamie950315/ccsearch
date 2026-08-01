@@ -27,6 +27,7 @@ from ccsearch import (
     mask_secret,
     validate_query,
     validate_execution_options,
+    DEFAULT_CACHE_TTL_MINUTES,
 )
 
 # ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ def search(
     offset: int|None=None,
     result_limit: int|None=None,
     cache: bool=False,
-    cache_ttl: int=10,
+    cache_ttl: int=DEFAULT_CACHE_TTL_MINUTES,
     semantic_cache: bool=False,
     semantic_threshold: float=0.9,
     include_hosts: str|None=None,
@@ -73,7 +74,7 @@ def search(
         offset: Pagination offset (brave engine only)
         result_limit: Trim returned results for brave/both/llm-context
         cache: Enable server-side result caching
-        cache_ttl: Cache time-to-live in minutes
+        cache_ttl: Cache freshness in minutes (default/max 129600, or 90 days)
         semantic_cache: Enable semantic similarity cache matching
         semantic_threshold: Cosine similarity threshold for semantic cache (0.0-1.0)
         include_hosts: Comma-separated host allow-list for brave/both/llm-context
@@ -117,7 +118,7 @@ def fetch(
     url: str,
     flaresolverr: bool=False,
     cache: bool=False,
-    cache_ttl: int=10,
+    cache_ttl: int=DEFAULT_CACHE_TTL_MINUTES,
 ) -> dict:
     """Fetch and extract text content from a URL.
 
@@ -125,7 +126,7 @@ def fetch(
         url: The URL to fetch (must start with http:// or https://)
         flaresolverr: Force FlareSolverr headless browser for Cloudflare-protected or SPA pages
         cache: Enable server-side result caching
-        cache_ttl: Cache time-to-live in minutes
+        cache_ttl: Cache freshness in minutes (default/max 129600, or 90 days)
     """
     config=load_config(CONFIG_PATH)
     validation_error=validate_query(url, "fetch")
@@ -169,7 +170,7 @@ def batch(
     requests: list[dict],
     engine: str|None=None,
     cache: bool=False,
-    cache_ttl: int=10,
+    cache_ttl: int=DEFAULT_CACHE_TTL_MINUTES,
     semantic_cache: bool=False,
     semantic_threshold: float=0.9,
     offset: int|None=None,
