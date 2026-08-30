@@ -357,7 +357,7 @@ The response includes:
 
 ### Deployment
 
-On the current Pi deployment, the API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/jamie/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first.
+The primary deployment runs on the A1-US Ubuntu ARM64 host. Its API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/ubuntu/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first. The previous Pi 5 deployment remains enabled as a rollback replica.
 
 `ccsearch-cache-prune.timer` runs the checked-in `systemd/ccsearch-cache-prune.service` hourly so files that have reached day 91 are removed even when they are never requested again.
 
@@ -370,13 +370,13 @@ sudo systemctl status ccsearch-api   # Check status
 journalctl -u ccsearch-api -f        # View logs
 ```
 
-The service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`.
+The A1-US service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`. FlareSolverr is bound to `127.0.0.1:8191` on A1-US and is not publicly reachable.
 
 ---
 
 ## MCP Server
 
-`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the current Pi deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the primary A1-US deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
 
 ### Architecture
 
@@ -449,7 +449,7 @@ async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as 
 
 ### Deployment
 
-- **Runtime**: Python 3.13 (`/usr/bin/python3`) with `mcp>=1.26.0`
+- **Runtime**: Python 3 with `mcp>=1.26.0,<2` (FastMCP imports used by this project are not compatible with MCP 2.x)
 - **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
 - **Systemd service**: `ccsearch-mcp.service`
 - **Cloudflare Tunnel**: `ccsearch-mcp.0ruka.dev → localhost:8890`

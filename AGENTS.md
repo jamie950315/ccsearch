@@ -1,6 +1,6 @@
 @CLAUDE.md
 
-# Repository and Pi 5 Operations
+# Repository and Deployment Operations
 
 This file records repository-specific working rules and the verified deployment state. `CLAUDE.md` describes the code architecture in more detail. Re-check live state before relying on this snapshot because services and untracked configuration can change independently of Git.
 
@@ -12,29 +12,29 @@ This file records repository-specific working rules and the verified deployment 
 - `test_ccsearch.py` is the unit and regression suite. It does not replace live HTTP, MCP transport, systemd, Docker, or tunnel smoke tests.
 - `skills/SKILL.md` is the generic self-hosted HTTP skill template. `skills/claude_dot_ai_Specific_SKILL.md` is the Claude.ai-oriented variant. Keep both synchronized with public API behavior while preserving their intentional setup differences.
 
-## Verified Pi 5 Deployment
+## Verified Deployment
 
-Snapshot verified on 2026-08-01 on Raspberry Pi 5, Debian 13.4 aarch64, Python 3.13.5:
+Snapshot verified on 2026-08-30. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The previous Raspberry Pi 5 deployment remains enabled and healthy as a rollback replica; do not stop or overwrite it until the A1 deployment has remained stable long enough for an explicit retirement decision.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
-| HTTP API | `ccsearch-api.service`, enabled and running as `jamie` | `0.0.0.0:8888`, `https://ccsearch.0ruka.dev` |
-| MCP | `ccsearch-mcp.service`, enabled and running as `jamie` | `0.0.0.0:8890`, `https://ccsearch-mcp.0ruka.dev` |
+| HTTP API | `ccsearch-api.service`, enabled and running as `ubuntu` on A1-US | `0.0.0.0:8888`, `https://ccsearch.0ruka.dev` |
+| MCP | `ccsearch-mcp.service`, enabled and running as `ubuntu` on A1-US | `0.0.0.0:8890`, `https://ccsearch-mcp.0ruka.dev` |
 | Cache cleanup | `ccsearch-cache-prune.timer`, enabled and active | Hourly; deletes result files beginning on day 91 |
-| FlareSolverr | Docker container `flaresolverr`, image `ghcr.io/flaresolverr/flaresolverr:latest` | `0.0.0.0:8191`; version 3.4.6 at snapshot time |
-| Public ingress | `cloudflared.service`, enabled and running | `/etc/cloudflared/config.yml` maps the two public hostnames above to localhost |
+| FlareSolverr | Docker container `flaresolverr`, image `ghcr.io/flaresolverr/flaresolverr:latest` | `127.0.0.1:8191` only |
+| Public ingress | `cloudflared-a1.service`, enabled and running on A1-US | `/etc/cloudflared/a1-services.yml` maps the two public hostnames above to localhost |
 
-The API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/jamie/ccsearch`, load `/home/jamie/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
+The A1-US API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/ubuntu/ccsearch`, load `/home/ubuntu/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
 
 The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
 
-FlareSolverr currently listens on every IPv4 and IPv6 interface and has no authentication. Restricting it to localhost is tracked in `TODO.md`; do not assume port `8191` is private merely because ccsearch addresses it as `localhost`.
+FlareSolverr has no authentication and is intentionally bound to localhost only on A1-US. Preserve that binding in all future deployments. The Pi rollback replica predates this hardening and must not become the public DNS target without re-checking its listener and firewall state.
 
 ### Current Non-secret Runtime Configuration
 
 The live, untracked `config.ini` differs from `config.ini.example`:
 
-- Brave: one cross-process 50 RPS limit shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries on this Pi; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscription is not visible to this limiter.
+- Brave: one cross-process 50 RPS limit shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries on A1-US; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscription is not visible to this limiter.
 - Perplexity: `perplexity/sonar-pro-search`, citations on, temperature 0.1, 16,384 max tokens, 2 retries.
 - LLM Context: 30 results, 16,384 max tokens, 20 URLs, lenient threshold, 2 retries.
 - Fetch: `http://localhost:8191/v1`, 60-second FlareSolverr timeout, fallback mode.
