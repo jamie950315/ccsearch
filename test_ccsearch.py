@@ -4461,6 +4461,24 @@ class TestApiServer(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "Server Error")
 
     @patch('api_server.load_config')
+    @patch('api_server.execute_query')
+    def test_fetch_result_error_maps_to_424(self, mock_execute, mock_load):
+        mock_load.return_value = _make_config()
+        mock_execute.return_value = {
+            "engine": "fetch",
+            "status_code": 404,
+            "final_url": "https://example.com/missing",
+            "error": "HTTP 404 returned by https://example.com/missing",
+        }
+        response = self.client.post(
+            '/search',
+            headers={'X-API-Key': self.api_key},
+            json={'query': 'https://example.com/missing', 'engine': 'fetch'},
+        )
+        self.assertEqual(response.status_code, 424)
+        self.assertEqual(response.get_json()["status_code"], 404)
+
+    @patch('api_server.load_config')
     @patch('api_server.execute_batch')
     def test_batch_success(self, mock_batch, mock_load):
         mock_load.return_value = _make_config()
@@ -4574,6 +4592,18 @@ class TestMcpServerTools(unittest.TestCase):
         self.assertEqual(result["engine"], "fetch")
         mock_execute.assert_called_once()
 
+    @patch('mcp_server.execute_query')
+    @patch('mcp_server.load_config')
+    def test_fetch_result_error_raises_tool_failure(self, mock_load, mock_execute):
+        mock_load.return_value = _make_config()
+        mock_execute.return_value = {
+            "engine": "fetch",
+            "status_code": 404,
+            "error": "HTTP 404 returned by https://example.com/missing",
+        }
+        with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+            self.mcp_server.fetch("https://example.com/missing")
+
     def test_engines_tool_returns_diagnostics(self):
         result = self.mcp_server.engines()
         self.assertIn("engines", result)
@@ -4599,13 +4629,12 @@ class TestMcpServerTools(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_fetch_validation_error(self):
-        result = self.mcp_server.fetch("notaurl")
-        self.assertIn("error", result)
+        with self.assertRaisesRegex(ValueError, "valid HTTP or HTTPS URL"):
+            self.mcp_server.fetch("notaurl")
 
     def test_fetch_invalid_cache_ttl_error(self):
-        result = self.mcp_server.fetch("https://example.com", cache_ttl=0)
-        self.assertIn("error", result)
-        self.assertIn("cache_ttl", result["error"])
+        with self.assertRaisesRegex(ValueError, "cache_ttl"):
+            self.mcp_server.fetch("https://example.com", cache_ttl=0)
 
     def test_engines_tool(self):
         result = self.mcp_server.engines()

@@ -279,6 +279,7 @@ Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 | 401 | Missing or invalid API key |
 | 400 | Bad request (missing query/engine, invalid URL for fetch, unsupported option combinations) |
 | 500 | Server or upstream failure (`Server Error`, `Search Failed`, or `Batch Failed`) |
+| 424 | Fetch completed with an upstream HTTP, conversion, or empty-content error; response metadata is preserved |
 
 ## Important Notes
 

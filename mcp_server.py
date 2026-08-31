@@ -131,16 +131,16 @@ def fetch(
     config=load_config(CONFIG_PATH)
     validation_error=validate_query(url, "fetch")
     if validation_error:
-        return {"error": validation_error}
+        raise ValueError(validation_error)
     option_error=validate_execution_options(
         "fetch",
         cache_ttl=cache_ttl,
         flaresolverr=flaresolverr,
     )
     if option_error:
-        return {"error": option_error}
+        raise ValueError(option_error)
     try:
-        return execute_query(
+        result=execute_query(
             url,
             "fetch",
             config,
@@ -149,7 +149,10 @@ def fetch(
             flaresolverr=flaresolverr,
         )
     except (ValueError, RuntimeError) as e:
-        return {"error": str(e)}
+        raise RuntimeError(str(e)) from e
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    return result
 
 @mcp.tool()
 def engines() -> dict:

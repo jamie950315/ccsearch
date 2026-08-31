@@ -100,5 +100,5 @@ Also run checks proportional to the changed surface:
 - Cache freshness defaults to and is capped at 90 days. Files are unreadable after 90 days and deleted beginning on day 91 by the hourly timer or the next cleanup pass; keep exact and semantic cache behavior synchronized.
 - `offset` is supported by `brave` and `both`.
 - HTTP non-health endpoints use `X-API-Key`; MCP uses the key as a path prefix.
-- The HTTP API currently maps validation failures to 400, authentication failures to 401, and server/upstream failures to 500. Do not document a 502 path unless the implementation is changed first.
+- The HTTP API maps validation failures to 400, authentication failures to 401, completed fetch error payloads to 424 while preserving their metadata through Cloudflare, and unexpected server failures to 500.
 - Keep `README.md` in English unless the user explicitly requests another language.
