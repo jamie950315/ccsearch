@@ -14,7 +14,7 @@ This file records repository-specific working rules and the verified deployment 
 
 ## Verified Deployment
 
-Snapshot verified on 2026-09-01. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The previous Raspberry Pi 5 deployment remains enabled and healthy as a rollback replica; do not stop or overwrite it until the A1 deployment has remained stable long enough for an explicit retirement decision.
+Snapshot verified on 2026-09-01. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The Raspberry Pi 5 checkout is a cold standby: its API and MCP services are disabled and inactive. Keep its code current and preserve its Pi-specific untracked configuration and secrets, but do not start its services unless the user explicitly chooses to fail over.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ The A1-US API and MCP units live in `/etc/systemd/system/`, use `WorkingDirector
 
 The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
 
-FlareSolverr has no authentication and is intentionally bound to localhost only on A1-US. Preserve that binding in all future deployments. The Pi rollback replica predates this hardening and must not become the public DNS target without re-checking its listener and firewall state.
+FlareSolverr has no authentication and is intentionally bound to localhost only on A1-US. Preserve that binding in all future deployments. The Pi cold standby predates this hardening and must not become the public DNS target without re-checking its listener and firewall state.
 
 ### Current Non-secret Runtime Configuration
 
