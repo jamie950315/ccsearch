@@ -774,6 +774,33 @@ class TestPerformPerplexitySearch(unittest.TestCase):
         self.assertEqual(result["citation_hosts"], ["example.com"])
         self.assertEqual(result["citation_host_count"], 1)
 
+    @patch('ccsearch.retry_request')
+    def test_extracts_openrouter_message_url_citation_annotations(self, mock_req):
+        mock_req.return_value = _mock_response(json_data={
+            "choices": [{"message": {
+                "content": "Answer [1]",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url_citation": {
+                            "url": "https://example.com/docs",
+                            "title": "Example Docs",
+                            "start_index": 0,
+                            "end_index": 7,
+                        },
+                    },
+                    {
+                        "type": "url_citation",
+                        "url_citation": {"url": "https://example.com/docs"},
+                    },
+                ],
+            }}],
+        })
+        result = ccsearch.perform_perplexity_search("test", "key", self._default_config())
+        self.assertEqual(result["citations"], [
+            {"url": "https://example.com/docs", "title": "Example Docs"},
+        ])
+
 
 # ===========================================================================
 # 6. perform_both_search
@@ -1581,8 +1608,11 @@ class TestFlaresolverrFetch(unittest.TestCase):
             "message": "Challenge solved!",
             "solution": {"response": "<html><body>Solved</body></html>", "status": 200}
         })
-        html = ccsearch._flaresolverr_fetch('http://target.com', 'http://localhost:8191/v1', 60000)
-        self.assertIn('Solved', html)
+        response = ccsearch._flaresolverr_fetch('http://target.com', 'http://localhost:8191/v1', 60000)
+        self.assertIn('Solved', response.text)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.url, 'http://target.com')
+        self.assertEqual(response.headers['Content-Type'], 'text/html; charset=utf-8')
         # Verify POST payload
         call_kwargs = mock_post.call_args
         payload = call_kwargs.kwargs['json']
@@ -1606,6 +1636,24 @@ class TestFlaresolverrFetch(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             ccsearch._flaresolverr_fetch('http://x', 'http://localhost:8191/v1')
         self.assertIn('Unknown error', str(ctx.exception))
+
+    @patch('ccsearch.requests.post')
+    def test_preserves_solution_status_url_and_headers(self, mock_post):
+        mock_post.return_value = _mock_response(json_data={
+            "status": "ok",
+            "solution": {
+                "response": "<html><body>Not found</body></html>",
+                "status": 404,
+                "url": "https://example.com/missing",
+                "headers": {"Content-Type": "text/html", "X-Test": "yes"},
+            },
+        })
+        response = ccsearch._flaresolverr_fetch(
+            'https://example.com/original', 'http://localhost:8191/v1'
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.url, 'https://example.com/missing')
+        self.assertEqual(response.headers['X-Test'], 'yes')
 
     @patch('ccsearch.requests.post')
     def test_timeout_calculation(self, mock_post):
@@ -2187,6 +2235,20 @@ class TestPerformFetch(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("FlareSolverr failed", result["error"])
 
+    @patch('ccsearch._flaresolverr_fetch')
+    def test_always_mode_preserves_http_error_status(self, mock_ff):
+        mock_ff.return_value = _mock_response(
+            404,
+            text='<html><body>Not found</body></html>',
+            headers={'Content-Type': 'text/html'},
+            url='https://example.com/missing',
+        )
+        config = _make_config(flaresolverr_mode='always', flaresolverr_url='http://fs:8191/v1')
+        result = ccsearch.perform_fetch('https://example.com/missing', config)
+        self.assertEqual(result["status_code"], 404)
+        self.assertEqual(result["fetched_via"], "flaresolverr")
+        self.assertIn("HTTP 404", result["error"])
+
     @patch('ccsearch._simple_fetch')
     @patch('ccsearch._flaresolverr_fetch')
     def test_always_mode_does_not_call_simple_fetch(self, mock_ff, mock_sf):
@@ -2280,6 +2342,58 @@ class TestPerformFetch(unittest.TestCase):
         result = ccsearch.perform_fetch('http://x', config)
         self.assertEqual(result["fetched_via"], "flaresolverr")
         self.assertIn("Rescued", result["content"])
+
+    @patch('ccsearch._flaresolverr_fetch')
+    @patch('ccsearch._simple_fetch')
+    def test_direct_404_is_not_replaced_by_flaresolverr(self, mock_sf, mock_ff):
+        response = _mock_response(
+            404,
+            text='<html><body>Not found</body></html>',
+            headers={'Content-Type': 'text/html', 'cf-ray': 'abc'},
+            url='https://example.com/missing',
+        )
+        error = requests.exceptions.HTTPError("404 Client Error", response=response)
+        mock_sf.side_effect = error
+        config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
+        result = ccsearch.perform_fetch('https://example.com/missing', config)
+        self.assertEqual(result["status_code"], 404)
+        self.assertEqual(result["fetched_via"], "direct")
+        self.assertIn("HTTP 404", result["error"])
+        mock_ff.assert_not_called()
+
+    @patch('ccsearch._flaresolverr_fetch')
+    @patch('ccsearch._simple_fetch')
+    def test_binary_403_is_not_sent_to_flaresolverr(self, mock_sf, mock_ff):
+        response = _mock_response(
+            403,
+            text='<html><title>Just a moment...</title></html>',
+            headers={'Content-Type': 'text/html', 'cf-ray': 'abc'},
+            url='https://example.com/report.pdf',
+        )
+        error = requests.exceptions.HTTPError("403 Client Error", response=response)
+        mock_sf.side_effect = error
+        config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
+        result = ccsearch.perform_fetch('https://example.com/report.pdf', config)
+        self.assertEqual(result["status_code"], 403)
+        self.assertEqual(result["fetched_via"], "direct")
+        self.assertIn("HTTP 403", result["error"])
+        mock_ff.assert_not_called()
+
+    @patch('ccsearch._flaresolverr_fetch')
+    @patch('ccsearch._simple_fetch')
+    def test_empty_spa_result_is_reported_as_error(self, mock_sf, mock_ff):
+        shell='<html><head><title>App</title></head><body><div id="root"></div><script>boot()</script></body></html>'
+        mock_sf.return_value = _mock_response(
+            200,
+            text=shell,
+            headers={'Content-Type': 'text/html'},
+            url='https://example.com/app',
+        )
+        mock_ff.return_value = shell
+        config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
+        result = ccsearch.perform_fetch('https://example.com/app', config)
+        self.assertIn("error", result)
+        self.assertIn("SPA shell detected", result["error"])
 
     # ---- Mode: fallback — direct fails → FS also fails ----
 

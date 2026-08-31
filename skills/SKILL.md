@@ -290,6 +290,7 @@ Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 - Use `include_hosts`, `exclude_hosts`, and `result_limit` when you need tighter source control instead of post-filtering results yourself.
 - Use `/diagnostics` or `/engines` when a request fails and you need to check whether dependencies or engine capabilities are available server-side.
 - Use `/batch` when you have several independent lookups/fetches and want one network round-trip.
+- Treat any fetch payload containing `error` as failed. Check `status_code`, `final_url`, and non-empty extracted content before relying on a page. PDF conversion is supported by the standard server install; JavaScript apps or empty rendered pages may require an interactive browser.
 - The server handles all API keys, rate limits, and caching internally.
 - Server-side Brave engines prefer `BRAVE_SEARCH_API_KEY`, fall back to `BRAVE_API_KEY` only when needed, and share one local subscription limiter capped at 50 RPS.
 - Cached results can be read for at most 90 days. Beginning on day 91, result files and orphaned semantic-index entries are deleted by server maintenance.

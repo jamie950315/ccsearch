@@ -43,13 +43,14 @@ Search-style engines also normalize their output for downstream agents:
    - `brave`, the Brave side of `both`, and `llm-context` all prefer `BRAVE_SEARCH_API_KEY`. The legacy `BRAVE_API_KEY` remains a compatibility fallback only when the Search key is unset.
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
-### Optional Fetch Extras
+### Fetch Document Support
 
-- For richer binary document conversion in `fetch`, install MarkItDown with the formats you care about:
+- `requirements.txt` includes MarkItDown's PDF dependencies, so PDF-to-Markdown conversion works in the standard install.
+- For additional Office formats, install the extra formats you need:
   ```bash
-  pip install 'markitdown[pdf,docx,pptx,xlsx]'
+  pip install 'markitdown[docx,pptx,xlsx]'
   ```
-- Without MarkItDown installed, `fetch` still works for HTML and plain-text responses, but supported binary documents return a clear error payload instead of low-quality extracted text.
+- If a requested converter is unavailable or fails, `fetch` returns a structured error payload instead of low-quality extracted text.
 
 ## Usage for Humans
 
@@ -244,6 +245,7 @@ For `fetch` responses, the JSON payload now includes transport metadata such as:
     - code: `code_language`, `code_line_count`
 - `chunk_count`: total number of structured chunks
 - `outbound_links`: deduplicated page-level HTTP/HTTPS links with anchor text, source chunk index, hostname, and same-host classification
+- `error`: present when the HTTP response failed, document conversion failed, or browser rendering produced no extractable content; callers must treat this as a failed fetch even when transport metadata is present
 - `outbound_link_count`: total unique outbound link count across all chunks
 - `internal_outbound_link_count`: same-host outbound links
 - `external_outbound_link_count`: off-site outbound links
@@ -480,7 +482,7 @@ The `fetch` engine uses a multi-layered approach to access protected websites:
    ```
 
 ### Modes
-- **`fallback`** (default): Tries a normal HTTP request first. If it fails or detects a Cloudflare challenge, automatically retries through FlareSolverr.
+- **`fallback`** (default): Tries a normal HTTP request first. Eligible Cloudflare challenge responses and network failures may retry through FlareSolverr. Ordinary HTTP errors such as 404 and known binary-document URLs are preserved instead of being replaced by rendered HTML.
 - **`always`**: Skips the normal request and always uses FlareSolverr. Useful for sites that are known to be protected.
 - **`never`**: Never uses FlareSolverr, even if configured.
 
@@ -576,13 +578,13 @@ ccsearch "https://eslint.org/docs/latest/rules/no-unused-vars" -e fetch --format
 ```bash
 ccsearch "https://example.com/report.pdf" -e fetch --format json
 ```
-*Use this for PDFs or Office files. If MarkItDown is installed, supported binary documents are converted into Markdown and the JSON response includes `"converted_via": "markitdown"`. If it is not installed, ccsearch returns a clear error telling you what is missing.*
+*Use this for PDFs or Office files. PDF conversion is included in the standard requirements; supported documents are converted into Markdown and the JSON response includes `"converted_via": "markitdown"`. Conversion failures return a structured `error`.*
 
 **Fetch with FlareSolverr (Cloudflare bypass):**
 ```bash
 ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr
 ```
-*Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. The JSON output includes a `"fetched_via"` field (`"direct"` or `"flaresolverr"`) so you know which method was used. In `fallback` mode (default), Cloudflare is auto-detected and FlareSolverr is used automatically — no flag needed.*
+*Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. The JSON output includes a `"fetched_via"` field (`"direct"` or `"flaresolverr"`) and preserves the rendered response's final URL, status, and content type. Empty rendered pages return an `error` directing callers to an interactive browser.*
 
 **Semantic Cache Example:**
 ```bash

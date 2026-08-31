@@ -894,8 +894,24 @@ def _extract_perplexity_citations(data):
     """Normalize citation-like payloads from OpenRouter/Perplexity responses."""
     citations=[]
     seen=set()
-    for field in ("citations", "references", "sources"):
-        raw=data.get(field)
+    message={}
+    choices=data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        candidate=choices[0].get("message")
+        if isinstance(candidate, dict):
+            message=candidate
+
+    payloads=[]
+    for container in (data, message):
+        for field in ("citations", "references", "sources"):
+            raw=container.get(field)
+            if raw:
+                payloads.append(raw)
+    annotations=message.get("annotations")
+    if annotations:
+        payloads.append(annotations)
+
+    for raw in payloads:
         if not raw:
             continue
         entries=raw if isinstance(raw, list) else [raw]
@@ -904,6 +920,9 @@ def _extract_perplexity_citations(data):
                 url=entry.strip()
                 title=None
             elif isinstance(entry, dict):
+                nested=entry.get("url_citation")
+                if isinstance(nested, dict):
+                    entry=nested
                 url=(
                     entry.get("url")
                     or entry.get("link")
@@ -1961,14 +1980,19 @@ def _convert_with_markitdown(content_bytes, url, content_type=None):
         except TypeError:
             # Fall back to the file-path API for older/newer signatures we don't know.
             pass
+        except Exception as exc:
+            return None, f"Binary document conversion failed: {exc}"
 
     with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as tmp:
         tmp.write(content_bytes)
         tmp_path=tmp.name
     try:
-        result=md.convert(tmp_path)
-        text=getattr(result, "text_content", None) or str(result)
-        return text.strip(), None
+        try:
+            result=md.convert(tmp_path)
+            text=getattr(result, "text_content", None) or str(result)
+            return text.strip(), None
+        except Exception as exc:
+            return None, f"Binary document conversion failed: {exc}"
     finally:
         try:
             os.unlink(tmp_path)
@@ -2037,7 +2061,67 @@ def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
     data=response.json()
     if data.get("status")!="ok":
         raise Exception(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
-    return data["solution"]["response"]
+    solution=data.get("solution") or {}
+    if "response" not in solution:
+        raise Exception("FlareSolverr error: response body is missing")
+    result=requests.Response()
+    result.status_code=int(solution.get("status") or 200)
+    result.url=solution.get("url") or url
+    headers=solution.get("headers") or {}
+    if isinstance(headers, dict):
+        result.headers.update(headers)
+    elif isinstance(headers, list):
+        for item in headers:
+            if isinstance(item, dict) and item.get("name"):
+                result.headers[str(item["name"])]=str(item.get("value", ""))
+    body=solution.get("response") or ""
+    result._content=body.encode("utf-8") if isinstance(body, str) else bytes(body)
+    result.encoding="utf-8"
+    if not result.headers.get("Content-Type"):
+        result.headers["Content-Type"]="text/html; charset=utf-8"
+    return result
+
+def _coerce_flaresolverr_response(value, url):
+    """Accept response objects from production and strings from older callers/tests."""
+    if hasattr(value, "status_code") and hasattr(value, "content"):
+        return value
+    response=requests.Response()
+    response.status_code=200
+    response.url=url
+    response.headers["Content-Type"]="text/html; charset=utf-8"
+    response._content=(value or "").encode("utf-8") if isinstance(value, str) else bytes(value or b"")
+    response.encoding="utf-8"
+    return response
+
+def _http_fetch_error(response):
+    """Return a stable error for non-success HTTP responses."""
+    status=getattr(response, "status_code", None)
+    if isinstance(status, int) and status >= 400:
+        return f"HTTP {status} returned by {_normalize_final_url(response, '')}"
+    return None
+
+def _build_flaresolverr_fetch_result(url, value):
+    """Extract a FlareSolverr response while preserving transport metadata."""
+    response=_coerce_flaresolverr_response(value, url)
+    http_error=_http_fetch_error(response)
+    if http_error:
+        return _build_fetch_result(url, "flaresolverr", response=response, error=http_error)
+    final_url=_normalize_final_url(response, url)
+    title, clean_text, chunks=_extract_html_content(response.content, base_url=final_url)
+    metadata=_extract_html_metadata(response.content, base_url=final_url)
+    empty_error=None
+    if not clean_text.strip():
+        empty_error="No extractable content returned after browser rendering; use an interactive browser."
+    return _build_fetch_result(
+        url,
+        "flaresolverr",
+        response=response,
+        title=title,
+        content=clean_text,
+        error=empty_error,
+        metadata=metadata,
+        chunks=chunks,
+    )
 
 _TWITTER_HOSTS={'twitter.com','www.twitter.com','mobile.twitter.com','x.com','www.x.com','mobile.x.com','api.fxtwitter.com','fxtwitter.com','vxtwitter.com','fixvx.com'}
 _TWITTER_NON_USER_PATHS={'home','explore','search','notifications','messages','settings','i','tos','privacy','hashtag','intent','share','login','compose','who_to_follow','lists'}
@@ -2175,11 +2259,9 @@ def perform_fetch(url, config):
     if useAlways:
         try:
             sys.stderr.write("[ccsearch] Using FlareSolverr (always mode)...\n")
-            html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+            flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
             sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
-            title, cleanText, chunks=_extract_html_content(html, base_url=url)
-            metadata=_extract_html_metadata(html, base_url=url)
-            return _build_fetch_result(url, "flaresolverr", title=title, content=cleanText, metadata=metadata, chunks=chunks)
+            return _build_flaresolverr_fetch_result(url, flare_response)
         except Exception as e:
             return _build_fetch_result(url, "flaresolverr", error=f"FlareSolverr failed: {e}")
 
@@ -2190,20 +2272,31 @@ def perform_fetch(url, config):
         response=_simple_fetch(url, maxRetries)
     except Exception as e:
         simpleFetchErr=e
+        response=getattr(e, "response", None)
 
     # Simple fetch succeeded — check for Cloudflare challenge
     if response is not None:
-        if canFallback and _detect_cloudflare(response):
+        direct_http_error=_http_fetch_error(response)
+        direct_status=getattr(response, "status_code", None)
+        requested_extension=_guess_extension(url)
+        binary_request=requested_extension in MARKITDOWN_EXTENSIONS
+        cloudflare_status=direct_status in {200, 403, 429, 503}
+        cloudflare_blocked=(
+            canFallback
+            and not binary_request
+            and cloudflare_status
+            and _detect_cloudflare(response)
+        )
+        if cloudflare_blocked:
             sys.stderr.write("[ccsearch] Cloudflare detected, falling back to FlareSolverr...\n")
             try:
-                html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+                flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
                 sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
-                final_url=_normalize_final_url(response, url)
-                title, cleanText, chunks=_extract_html_content(html, base_url=final_url)
-                metadata=_extract_html_metadata(html, base_url=final_url)
-                return _build_fetch_result(url, "flaresolverr", response=response, title=title, content=cleanText, metadata=metadata, chunks=chunks)
+                return _build_flaresolverr_fetch_result(url, flare_response)
             except Exception as flareErr:
                 return _build_fetch_result(url, "direct", response=response, error=f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}")
+        if direct_http_error:
+            return _build_fetch_result(url, "direct", response=response, error=direct_http_error)
         converted_result=_convert_binary_response(url, response)
         if converted_result:
             return converted_result
@@ -2227,27 +2320,29 @@ def perform_fetch(url, config):
         if canFallback and isSpa:
             sys.stderr.write(f"[ccsearch] SPA shell detected ({spaReason}), falling back to FlareSolverr...\n")
             try:
-                html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+                flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
                 sys.stderr.write("[ccsearch] FlareSolverr rendered page successfully.\n")
-                final_url=_normalize_final_url(response, url)
-                fTitle, fCleanText, fChunks=_extract_html_content(html, base_url=final_url)
-                if len(fCleanText)>len(cleanText):
-                    rendered_metadata=_extract_html_metadata(html, base_url=final_url)
-                    return _build_fetch_result(url, "flaresolverr", response=response, title=fTitle, content=fCleanText, metadata=rendered_metadata, chunks=fChunks)
+                rendered=_build_flaresolverr_fetch_result(url, flare_response)
+                rendered_content=rendered.get("content", "")
+                if not rendered.get("error") and len(rendered_content)>len(cleanText):
+                    return rendered
                 sys.stderr.write("[ccsearch] FlareSolverr result not better, using direct response.\n")
             except Exception as flareErr:
                 sys.stderr.write(f"[ccsearch] FlareSolverr fallback failed: {flareErr}\n")
-        return _build_fetch_result(url, "direct", response=response, title=title, content=cleanText, metadata=metadata, chunks=chunks)
+        content_error=None
+        if isSpa:
+            content_error=f"SPA shell detected ({spaReason}); browser rendering did not produce additional extractable content."
+        elif not cleanText.strip():
+            content_error="No extractable content found in the response."
+        return _build_fetch_result(url, "direct", response=response, title=title, content=cleanText, error=content_error, metadata=metadata, chunks=chunks)
 
     # Simple fetch failed — try FlareSolverr fallback
     if canFallback:
         sys.stderr.write(f"[ccsearch] Direct fetch failed ({simpleFetchErr}), falling back to FlareSolverr...\n")
         try:
-            html=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
+            flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
             sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
-            title, cleanText, chunks=_extract_html_content(html, base_url=url)
-            metadata=_extract_html_metadata(html, base_url=url)
-            return _build_fetch_result(url, "flaresolverr", title=title, content=cleanText, metadata=metadata, chunks=chunks)
+            return _build_flaresolverr_fetch_result(url, flare_response)
         except Exception as flareErr:
             return _build_fetch_result(url, "direct", error=f"Direct fetch failed: {simpleFetchErr} | FlareSolverr also failed: {flareErr}")
 

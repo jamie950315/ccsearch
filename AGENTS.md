@@ -14,7 +14,7 @@ This file records repository-specific working rules and the verified deployment 
 
 ## Verified Deployment
 
-Snapshot verified on 2026-08-30. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The previous Raspberry Pi 5 deployment remains enabled and healthy as a rollback replica; do not stop or overwrite it until the A1 deployment has remained stable long enough for an explicit retirement decision.
+Snapshot verified on 2026-09-01. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The previous Raspberry Pi 5 deployment remains enabled and healthy as a rollback replica; do not stop or overwrite it until the A1 deployment has remained stable long enough for an explicit retirement decision.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ The live, untracked `config.ini` differs from `config.ini.example`:
 - LLM Context: 30 results, 16,384 max tokens, 20 URLs, lenient threshold, 2 retries.
 - Fetch: `http://localhost:8191/v1`, 60-second FlareSolverr timeout, fallback mode.
 - Batch: effective default is 4 workers (the code default is used when `[Batch]` is absent).
-- `curl_cffi`, `fastembed`, `markitdown`, and `mcp` are installed; all search engine credentials are present in the service environment.
+- `curl_cffi`, `fastembed`, `markitdown[pdf]`, and `mcp` are installed; all search engine credentials are present in the service environment.
 
 Treat these as a dated operational snapshot, not portable defaults. `config.ini.example` remains the conservative setup template.
 
@@ -90,6 +90,7 @@ Also run checks proportional to the changed surface:
 - HTTP API: use Flask tests plus live `/health`, authenticated `/diagnostics`, and the affected endpoint when safe.
 - MCP: exercise the affected tool and at least one real SSE or Streamable HTTP initialization when transport/auth code changes.
 - Fetch: test direct HTML extraction and, when relevant, the running FlareSolverr fallback.
+- Fetch results containing `error` are failures even when transport metadata is present. Preserve ordinary HTTP errors, verify binary conversion with a real document, and reject empty browser-rendered content.
 - Deployment: check systemd state, listeners, redacted recent logs, Docker state, and public Cloudflare routes.
 
 ## Documentation Sync Rules

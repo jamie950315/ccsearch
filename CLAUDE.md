@@ -34,7 +34,7 @@ The project now exposes a shared execution layer with:
 - Copy `config.ini.example` to `config.ini`
 - Use `./ccsearch.py --help` for CLI flags
 - The standard requirements currently install `fastembed` for semantic cache and `curl_cffi` for direct-fetch TLS impersonation. The code degrades gracefully if either is unavailable.
-- Optional extra: `markitdown[...]` for PDF / Office conversion in `fetch`.
+- The standard requirements include `markitdown[pdf]`; additional MarkItDown extras are optional for Office formats.
 
 ## Testing And Verification
 
@@ -107,12 +107,14 @@ When available, `_simple_fetch` uses `curl_cffi` with Chrome impersonation. Othe
 `fetch` also supports:
 
 - non-HTML text decoding
-- binary document conversion through optional MarkItDown integration
+- PDF conversion through the standard MarkItDown dependency and optional Office-format extras
 - JSON-LD and social metadata extraction
 - structured `chunks`
 - code/list/table preservation
 - outbound link extraction
 - X/Twitter routing through the fxtwitter API
+- structured failures for non-success HTTP responses, unavailable document converters, and browser-rendered pages with no extractable content
+- preservation of FlareSolverr final URL, HTTP status, and content type; ordinary 404 responses and known binary URLs are not hidden by HTML fallback
 
 ### Batch Execution
 
