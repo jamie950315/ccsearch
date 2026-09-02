@@ -42,7 +42,7 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 
 ## Operations
 
-- Bind FlareSolverr to localhost instead of all interfaces, or add an equivalent firewall restriction. It has no authentication and is currently published by Docker on `0.0.0.0:8191` and `[::]:8191`.
+- Keep FlareSolverr loopback-only on every host. A1-JP, the A1-US rollback copy, and Pi5 now bind `127.0.0.1:8191`; do not republish `0.0.0.0:8191` or `[::]:8191` if compose is recreated.
 - Replace MCP URL-path authentication with a mechanism that does not place the shared API key in access logs, or add reliable access-log redaction across Uvicorn and Cloudflare.
 - Replace the Flask development server with a production WSGI/ASGI deployment setup.
   - Gunicorn/Uvicorn worker model
