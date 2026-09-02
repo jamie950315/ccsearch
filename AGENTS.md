@@ -46,7 +46,7 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 ## Secrets and Configuration
 
 - Never print, commit, or paste values from `.env`, `.api_key`, `config.ini`, Cloudflare credentials, or authenticated MCP URLs.
-- `.env` and `.api_key` must remain mode `0600`; both are ignored by Git. `config.ini` is also untracked and may contain deployment-specific values.
+- `.env`, `.api_key`, and `config.ini` must remain mode `0600`; all three are ignored by Git and may contain deployment-specific values.
 - The Python programs do not load dotenv files themselves. systemd loads `.env`; for manual runs, export the variables in the shell first.
 - Every Brave-backed engine prefers `BRAVE_SEARCH_API_KEY`; `BRAVE_API_KEY` is used only as a compatibility fallback when the Search key is unset. `both` additionally requires `OPENROUTER_API_KEY`.
 - `CCSEARCH_API_KEY` from the environment takes precedence over `.api_key`. Both servers read the key at process startup, so changing it requires service restarts.
@@ -63,6 +63,9 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
   Linux or ARM64 verification when needed.
 - Commit approved changes on the Mac and push them to `origin/main` before
   deploying them.
+- Deployment hosts use the public HTTPS GitHub remote for fetches. Only the Mac
+  working copy pushes releases; never copy the Mac GitHub private key to A1-JP,
+  A1-US, or Pi5.
 - Deploy production changes by fast-forwarding A1-JP to the exact verified
   commit. Preserve its untracked `.env`, `.api_key`, and `config.ini`.
 - Restart only the services affected by the change. Documentation-only changes
