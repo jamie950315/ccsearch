@@ -52,6 +52,32 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 - `CCSEARCH_API_KEY` from the environment takes precedence over `.api_key`. Both servers read the key at process startup, so changing it requires service restarts.
 - MCP authentication embeds the shared key in the URL path. Uvicorn, systemd journal, proxies, and client logs can record that path. Do not show raw MCP access logs; redact the first path segment. AI assistants must never rotate the shared key autonomously. If the key is exposed in output during coding, stop reproducing it, redact it from subsequent output, notify the user, and ask whether they want it rotated. Rotate it only after explicit user approval.
 
+## Canonical Development and Deployment Workflow
+
+- Treat the Mac working copy as the canonical authoring workspace. A1-JP,
+  A1-US, and Pi5 are deployment targets, not normal code-editing locations.
+- Before making changes, inspect the Mac working tree and preserve any existing
+  unexplained work. Never overwrite or mix unrelated modifications.
+- Implement and test changes on the Mac working copy when its required
+  dependencies are available. Use the A1-JP virtual environment for additional
+  Linux or ARM64 verification when needed.
+- Commit approved changes on the Mac and push them to `origin/main` before
+  deploying them.
+- Deploy production changes by fast-forwarding A1-JP to the exact verified
+  commit. Preserve its untracked `.env`, `.api_key`, and `config.ini`.
+- Restart only the services affected by the change. Documentation-only changes
+  must not restart services.
+- Verify the affected CLI, HTTP API, MCP tools, Docker services, systemd units,
+  and public Cloudflare endpoints in proportion to the change.
+- After A1-JP passes production verification, fast-forward A1-US and Pi5 to the
+  same commit for rollback readiness. Do not start their ccsearch API, MCP,
+  cache, or public connector services.
+- Finish by confirming that Mac, GitHub, A1-JP, A1-US, and Pi5 reference the
+  same commit and that no unexpected tracked changes remain.
+- If an emergency edit is ever made directly on a deployment host, copy it
+  back into the Mac working copy, test it, commit it, and resynchronize every
+  deployment target before considering the work complete.
+
 ## Operations
 
 Read-only status checks:
