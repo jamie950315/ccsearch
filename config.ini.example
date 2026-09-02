@@ -1,7 +1,8 @@
 [Brave]
-# Combined requests per second for Brave Web Search and LLM Context. CLI, HTTP,
-# MCP, batch workers, and retries on this host share one cross-process limiter.
-# The code hard-caps this at the current Search plan capacity of 50 RPS. Keep the
+# Per-key requests per second for Brave Web Search and LLM Context. CLI, HTTP,
+# MCP, batch workers, and retries on this host share one cross-process limiter
+# with a separate 1-second window for each Brave Search API key. The code
+# hard-caps each key at the current Search plan capacity of 50 RPS. Keep the
 # portable default at 1 and set it according to your own subscription.
 requests_per_second = 1
 

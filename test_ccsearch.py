@@ -267,7 +267,7 @@ class TestReadWriteCache(unittest.TestCase):
 
     def test_prune_cache_ignores_non_result_json_and_lock_files(self):
         old_time = time.time() - ccsearch.CACHE_DELETE_AGE_SECONDS - 1
-        protected = ["semantic_index.json", "brave_subscription_rate_limit.json", "cache-temp.json"]
+        protected = ["semantic_index.json", "brave_subscription_rate_limit.json", "brave_key_round_robin.json", "cache-temp.json"]
         for name in protected:
             path = os.path.join(self.tmpdir, name)
             with open(path, "w", encoding="utf-8") as handle:
@@ -486,7 +486,35 @@ class TestBraveSubscriptionRateLimit(unittest.TestCase):
             _make_config(), now_fn=lambda: 100.0, sleep_fn=lambda _: None
         )
         with open(ccsearch._brave_rate_limit_path(), encoding='utf-8') as handle:
-            self.assertEqual(json.load(handle)["timestamps"], [100.0])
+            self.assertEqual(json.load(handle)["windows"]["default"], [100.0])
+
+    def test_legacy_timestamps_migrate_to_windows(self):
+        with open(ccsearch._brave_rate_limit_path(), 'w', encoding='utf-8') as handle:
+            json.dump({"timestamps": [98.0]}, handle)
+        ccsearch._wait_for_brave_rate_limit(
+            _make_config(), now_fn=lambda: 100.0, sleep_fn=lambda _: None
+        )
+        with open(ccsearch._brave_rate_limit_path(), encoding='utf-8') as handle:
+            payload=json.load(handle)
+        self.assertEqual(payload["windows"]["default"], [100.0])
+        self.assertNotIn("timestamps", payload)
+
+    def test_different_keys_have_independent_windows(self):
+        config=_make_config()
+        config.set('Brave', 'requests_per_second', '1')
+        clock=[100.0]
+        sleeps=[]
+        def now_fn():
+            return clock[0]
+        def sleep_fn(seconds):
+            sleeps.append(seconds)
+            clock[0]+=seconds
+
+        ccsearch._wait_for_brave_rate_limit(config, key_fingerprint='key-a', now_fn=now_fn, sleep_fn=sleep_fn)
+        ccsearch._wait_for_brave_rate_limit(config, key_fingerprint='key-b', now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(sleeps, [])
+        ccsearch._wait_for_brave_rate_limit(config, key_fingerprint='key-a', now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(len(sleeps), 1)
 
     @unittest.skipIf(ccsearch.fcntl is None, "cross-process file locking requires fcntl")
     def test_two_processes_share_the_same_50_rps_window(self):
@@ -509,6 +537,160 @@ class TestBraveSubscriptionRateLimit(unittest.TestCase):
         elapsed=time.time() - started
         self.assertTrue(all(process.exitcode == 0 for process in processes))
         self.assertGreaterEqual(elapsed, 0.75)
+
+
+class TestBraveApiKeyRotation(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir=tempfile.mkdtemp()
+        self.cache_patch=patch('ccsearch.get_cache_dir', return_value=self.tmpdir)
+        self.cache_patch.start()
+        self.config=_make_config()
+
+    def tearDown(self):
+        self.cache_patch.stop()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_split_api_key_blob_strips_quotes_and_dedupes(self):
+        self.assertEqual(
+            ccsearch._split_api_key_blob(' "key-a",key-a; key-b\nkey-c '),
+            ['key-a', 'key-b', 'key-c'],
+        )
+        self.assertEqual(ccsearch._split_api_key_blob('\u201ckey-a\u201d'), ['key-a'])
+
+    def test_list_keys_uses_numbered_and_plural_after_primary(self):
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_10': 'key-d',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+            'BRAVE_SEARCH_API_KEYS': 'key-c,key-a',
+            'BRAVE_API_KEY': 'legacy',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            keys, source=ccsearch._list_brave_api_keys()
+        self.assertEqual(keys, ['key-a', 'key-b', 'key-d', 'key-c'])
+        self.assertEqual(source, 'BRAVE_SEARCH_API_KEY')
+
+    def test_list_keys_falls_back_to_legacy_only_when_search_keys_missing(self):
+        with patch.dict(os.environ, {'BRAVE_API_KEY': 'legacy'}, clear=True):
+            self.assertEqual(
+                ccsearch._list_brave_api_keys(),
+                (['legacy'], 'BRAVE_API_KEY'),
+            )
+
+    def test_resolve_does_not_consume_round_robin_counter(self):
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+            'BRAVE_SEARCH_API_KEY_3': 'key-c',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(ccsearch._resolve_brave_api_key(), ('key-a', 'BRAVE_SEARCH_API_KEY'))
+            self.assertEqual(ccsearch._resolve_brave_api_key(), ('key-a', 'BRAVE_SEARCH_API_KEY'))
+            self.assertEqual(ccsearch._select_brave_api_key(), ('key-a', 'BRAVE_SEARCH_API_KEY'))
+
+    @patch('ccsearch.perform_brave_search')
+    def test_execute_engine_round_robins_numbered_keys(self, mock_search):
+        mock_search.return_value={"engine": "brave", "results": []}
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+            'BRAVE_SEARCH_API_KEY_3': 'key-c',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            for expected in ('key-a', 'key-b', 'key-c', 'key-a'):
+                ccsearch.execute_engine('q', 'brave', self.config)
+                self.assertEqual(mock_search.call_args[0][1], expected)
+
+    @patch('ccsearch.perform_llm_context_search')
+    @patch('ccsearch.perform_brave_search')
+    def test_brave_and_llm_context_share_one_rotation_counter(self, mock_brave, mock_lc):
+        mock_brave.return_value={"engine": "brave", "results": []}
+        mock_lc.return_value={"engine": "llm-context", "results": []}
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a,key-b,key-c',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            ccsearch.execute_engine('q1', 'brave', self.config)
+            ccsearch.execute_engine('q2', 'llm-context', self.config)
+        self.assertEqual(mock_brave.call_args[0][1], 'key-a')
+        self.assertEqual(mock_lc.call_args[0][1], 'key-b')
+
+    @patch('ccsearch.perform_brave_search')
+    def test_cache_hit_does_not_rotate_keys(self, mock_search):
+        mock_search.side_effect=[
+            {"engine": "brave", "query": "q1", "results": []},
+            {"engine": "brave", "query": "q2", "results": []},
+        ]
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+            'BRAVE_SEARCH_API_KEY_3': 'key-c',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            ccsearch.execute_query('q1', 'brave', self.config, cache=True)
+            ccsearch.execute_query('q1', 'brave', self.config, cache=True)
+            ccsearch.execute_query('q2', 'brave', self.config, cache=True)
+        self.assertEqual(mock_search.call_count, 2)
+        self.assertEqual(mock_search.call_args_list[0][0][1], 'key-a')
+        self.assertEqual(mock_search.call_args_list[1][0][1], 'key-b')
+
+    def test_diagnostics_reports_key_count_without_rotating(self):
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+            'BRAVE_SEARCH_API_KEY_3': 'key-c',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            diagnostics=ccsearch.get_diagnostics(self.config, include_engines=False)
+            selected, source=ccsearch._select_brave_api_key()
+        self.assertEqual(diagnostics["brave_rate_limit"]["key_count"], 3)
+        self.assertTrue(diagnostics["brave_rate_limit"]["round_robin"])
+        self.assertEqual(diagnostics["brave_rate_limit"]["combined_cap_rps"], 3)
+        self.assertEqual(diagnostics["brave_rate_limit"]["source"], 'BRAVE_SEARCH_API_KEY')
+        self.assertTrue(diagnostics["environment"]["BRAVE_SEARCH_API_KEY"])
+        self.assertEqual(selected, 'key-a')
+        self.assertEqual(source, 'BRAVE_SEARCH_API_KEY')
+
+    def test_corrupt_rotation_state_recovers(self):
+        with open(ccsearch._brave_key_rotation_path(), 'w', encoding='utf-8') as handle:
+            handle.write('{not json')
+        env={
+            'BRAVE_SEARCH_API_KEY': 'key-a',
+            'BRAVE_SEARCH_API_KEY_2': 'key-b',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(ccsearch._select_brave_api_key()[0], 'key-a')
+            self.assertEqual(ccsearch._select_brave_api_key()[0], 'key-b')
+
+    @unittest.skipIf(ccsearch.fcntl is None, "cross-process file locking requires fcntl")
+    def test_two_processes_share_round_robin_counter(self):
+        import multiprocessing
+
+        def worker(cache_dir, queue):
+            for name in list(os.environ):
+                if name.startswith('BRAVE_'):
+                    os.environ.pop(name, None)
+            os.environ['BRAVE_SEARCH_API_KEY']='key-a'
+            os.environ['BRAVE_SEARCH_API_KEY_2']='key-b'
+            ccsearch.get_cache_dir=lambda: cache_dir
+            key, _=ccsearch._select_brave_api_key()
+            queue.put(key)
+
+        context=multiprocessing.get_context('fork')
+        queue=context.Queue()
+        processes=[
+            context.Process(target=worker, args=(self.tmpdir, queue))
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(5)
+        selected=[queue.get(timeout=1) for _ in range(2)]
+        self.assertTrue(all(process.exitcode == 0 for process in processes))
+        self.assertEqual(set(selected), {'key-a', 'key-b'})
 
 
 # ===========================================================================
@@ -646,7 +828,9 @@ class TestPerformBraveSearch(unittest.TestCase):
         callback=mock_req.call_args.kwargs['before_attempt']
         with patch('ccsearch._wait_for_brave_rate_limit') as mock_wait:
             callback()
-        mock_wait.assert_called_once_with(config)
+        mock_wait.assert_called_once_with(
+            config, key_fingerprint=ccsearch._brave_key_fingerprint("key")
+        )
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -1088,7 +1272,9 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         callback=mock_req.call_args.kwargs['before_attempt']
         with patch('ccsearch._wait_for_brave_rate_limit') as mock_wait:
             callback()
-        mock_wait.assert_called_once_with(config)
+        mock_wait.assert_called_once_with(
+            config, key_fingerprint=ccsearch._brave_key_fingerprint("key")
+        )
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')

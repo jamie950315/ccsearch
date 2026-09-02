@@ -41,11 +41,11 @@ Cache freshness defaults to 90 days and cannot exceed 90 days. A shorter caller-
 
 ### Search Engines
 
-- `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY` and fall back to `BRAVE_API_KEY` only when the Search key is unset
+- `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY`, round-robin any extra Search keys, and fall back to `BRAVE_API_KEY` only when no Search key is set
 - `perplexity` uses OpenRouter
 - `both` runs Brave and Perplexity concurrently and preserves partial failures
 
-All Brave attempts, including retries, share a cross-process limiter capped at 50 RPS across the local CLI, HTTP API, and MCP services. The limiter cannot account for other devices using the same Brave subscription.
+All Brave attempts, including retries, share a cross-process limiter. Each Brave key has its own window, capped at 50 RPS per key, across the local CLI, HTTP API, and MCP services. Extra keys are selected round-robin for each live request. The limiter cannot account for other devices using the same Brave subscription.
 
 Search-style engines normalize output for downstream agents: cleaned text, `hostname`, `rank`, host summaries, optional `host_filtering`, optional `result_limiting`, `cache_status`, and `duration_ms`.
 
@@ -118,7 +118,7 @@ Keep the MCP server thin and forward into shared execution logic.
 
 ## Verified Deployment
 
-Snapshot verified on 2026-09-01, with the Pi5 FlareSolverr binding re-checked on 2026-09-03. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby: its API and MCP services remain disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
+Snapshot verified on 2026-09-01, with the Pi5 FlareSolverr binding re-checked on 2026-09-03 and Brave Search key round-robin verified on 2026-09-03. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby: its API and MCP services remain disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
@@ -138,7 +138,7 @@ FlareSolverr has no authentication and is bound to localhost only. The checked-i
 
 The live, untracked `config.ini` differs from `config.ini.example`:
 
-- Brave: one cross-process 50 RPS limit shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries on A1-JP; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscription is not visible to this limiter.
+- Brave: three Search API keys on A1-JP, round-robin per live request, with a per-key cross-process limiter shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscriptions is not visible to this limiter.
 - Perplexity: `perplexity/sonar-pro-search`, citations on, temperature 0.1, 16,384 max tokens, 2 retries.
 - LLM Context: 30 results, 16,384 max tokens, 20 URLs, lenient threshold, 2 retries.
 - Fetch: `http://localhost:8191/v1`, 60-second FlareSolverr timeout, fallback mode.
@@ -152,7 +152,7 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 - Never print, commit, or paste values from `.env`, `.api_key`, `config.ini`, Cloudflare credentials, or authenticated MCP URLs.
 - `.env`, `.api_key`, and `config.ini` must remain mode `0600`; all three are ignored by Git and may contain deployment-specific values.
 - The Python programs do not load dotenv files themselves. systemd loads `.env`; for manual runs, export the variables in the shell first.
-- Every Brave-backed engine prefers `BRAVE_SEARCH_API_KEY`; `BRAVE_API_KEY` is used only as a compatibility fallback when the Search key is unset. `both` additionally requires `OPENROUTER_API_KEY`.
+- Every Brave-backed engine prefers `BRAVE_SEARCH_API_KEY`, plus optional `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, or `BRAVE_SEARCH_API_KEYS`. `BRAVE_API_KEY` is used only as a compatibility fallback when no Search key is set. `both` additionally requires `OPENROUTER_API_KEY`.
 - `CCSEARCH_API_KEY` from the environment takes precedence over `.api_key`. Both servers read the key at process startup, so changing it requires service restarts.
 - Optional port overrides: `CCSEARCH_PORT` and `CCSEARCH_MCP_PORT`.
 - MCP authentication embeds the shared key in the URL path. Uvicorn, systemd journal, proxies, and client logs can record that path. Do not show raw MCP access logs; redact the first path segment. AI assistants must never rotate the shared key autonomously. If the key is exposed in output during coding, stop reproducing it, redact it from subsequent output, notify the user, and ask whether they want it rotated. Rotate it only after explicit user approval.

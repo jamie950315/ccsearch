@@ -137,6 +137,8 @@ _cache_lock = threading.Lock()
 _semantic_index_lock = threading.Lock()
 _cache_cleanup_lock = threading.Lock()
 _brave_rate_limit_thread_lock = threading.Lock()
+_brave_key_rotation_thread_lock = threading.Lock()
+_BRAVE_NUMBERED_KEY_RE = re.compile(r"^BRAVE_SEARCH_API_KEY_([1-9]\d*)$")
 _last_cache_cleanup_at=0.0
 
 ENGINE_DETAILS={
@@ -515,8 +517,30 @@ def update_semantic_index(query, engine, offset, cache_key_filename):
 def _brave_rate_limit_path():
     return os.path.join(get_cache_dir(), "brave_subscription_rate_limit.json")
 
+def _brave_key_rotation_path():
+    return os.path.join(get_cache_dir(), "brave_key_round_robin.json")
+
+def _brave_key_fingerprint(api_key):
+    """Return a non-secret identifier for one Brave subscription token."""
+    token=str(api_key or "").strip()
+    if not token:
+        return "default"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+def _brave_rate_limit_windows(payload):
+    """Normalize on-disk Brave limiter state into per-key timestamp windows."""
+    if not isinstance(payload, dict):
+        return {}
+    windows=payload.get("windows")
+    if isinstance(windows, dict):
+        return dict(windows)
+    timestamps=payload.get("timestamps")
+    if isinstance(timestamps, list):
+        return {"default": timestamps}
+    return {}
+
 def _brave_requests_per_second(config):
-    """Return the configured Brave rate capped at the Search plan's 50 RPS."""
+    """Return the configured per-key Brave rate capped at the Search plan's 50 RPS."""
     try:
         requested=config.getfloat('Brave', 'requests_per_second', fallback=1.0)
     except (ValueError, configparser.Error):
@@ -525,9 +549,10 @@ def _brave_requests_per_second(config):
         requested=1.0
     return max(1, min(BRAVE_SEARCH_MAX_RPS, int(requested)))
 
-def _wait_for_brave_rate_limit(config, now_fn=time.time, sleep_fn=time.sleep):
-    """Acquire one Brave request slot shared by local CLI/API/MCP processes."""
+def _wait_for_brave_rate_limit(config, key_fingerprint="default", now_fn=time.time, sleep_fn=time.sleep):
+    """Acquire one Brave request slot for a single subscription key."""
     capacity=_brave_requests_per_second(config)
+    fingerprint=str(key_fingerprint or "default")
     state_path=_brave_rate_limit_path()
     with _brave_rate_limit_thread_lock:
         with _locked_runtime_file(state_path) as state_file:
@@ -536,22 +561,45 @@ def _wait_for_brave_rate_limit(config, now_fn=time.time, sleep_fn=time.sleep):
                 state_file.seek(0)
                 try:
                     payload=json.load(state_file)
-                    timestamps=payload.get("timestamps", []) if isinstance(payload, dict) else []
+                    windows=_brave_rate_limit_windows(payload)
                 except (json.JSONDecodeError, OSError, ValueError):
-                    timestamps=[]
+                    windows={}
                 timestamps=[
-                    float(ts) for ts in timestamps
+                    float(ts) for ts in windows.get(fingerprint, [])
                     if isinstance(ts, (int, float)) and 0 <= now - float(ts) < 1.0
                 ]
                 if len(timestamps) < capacity:
                     timestamps.append(now)
+                    windows[fingerprint]=timestamps
                     state_file.seek(0)
                     state_file.truncate()
-                    json.dump({"timestamps": timestamps}, state_file)
+                    json.dump({"windows": windows}, state_file)
                     state_file.flush()
                     return
                 sleep_for=max(0.001, timestamps[0] + 1.0 - now)
                 sleep_fn(sleep_for)
+
+def _next_brave_key_index(key_count):
+    """Return the next round-robin index shared by local CLI/API/MCP processes."""
+    if key_count <= 1:
+        return 0
+    state_path=_brave_key_rotation_path()
+    with _brave_key_rotation_thread_lock:
+        with _locked_runtime_file(state_path) as state_file:
+            state_file.seek(0)
+            try:
+                payload=json.load(state_file)
+                counter=int(payload.get("counter", 0)) if isinstance(payload, dict) else 0
+            except (json.JSONDecodeError, OSError, ValueError, TypeError):
+                counter=0
+            if counter < 0:
+                counter=0
+            index=counter % key_count
+            state_file.seek(0)
+            state_file.truncate()
+            json.dump({"counter": counter + 1}, state_file)
+            state_file.flush()
+            return index
 
 def retry_request(method, url, max_retries, before_attempt=None, **kwargs):
     """Request wrapper with a simple Exponential Backoff mechanism"""
@@ -814,7 +862,7 @@ def perform_brave_search(query, api_key, config, offset=None):
     max_retries = config.getint('Brave', 'max_retries', fallback=2)
     response = retry_request(
         'GET', url, max_retries,
-        before_attempt=lambda: _wait_for_brave_rate_limit(config),
+        before_attempt=lambda: _wait_for_brave_rate_limit(config, key_fingerprint=_brave_key_fingerprint(api_key)),
         headers=headers, params=params, timeout=(10, 30),
     )
     data = response.json()
@@ -1020,7 +1068,7 @@ def perform_llm_context_search(query, api_key, config):
     max_retries = config.getint('LLMContext', 'max_retries', fallback=2)
     response = retry_request(
         'GET', url, max_retries,
-        before_attempt=lambda: _wait_for_brave_rate_limit(config),
+        before_attempt=lambda: _wait_for_brave_rate_limit(config, key_fingerprint=_brave_key_fingerprint(api_key)),
         headers=headers, params=params, timeout=(10, 30),
     )
     data = response.json()
@@ -2372,13 +2420,76 @@ def _engine_required_env_vars(engine):
     }
     return requirements.get(engine, [])
 
+def _normalize_secret_token(raw):
+    """Strip wrapping quotes and whitespace from a secret token."""
+    token=str(raw or "").strip()
+    token=token.strip("\"'")
+    token=token.strip("\u201c\u201d\u2018\u2019")
+    return token.strip()
+
+def _split_api_key_blob(raw):
+    """Split one environment value into ordered unique API keys."""
+    token=_normalize_secret_token(raw)
+    if not token:
+        return []
+    keys=[]
+    seen=set()
+    for part in re.split(r"[\s,;]+", token):
+        key=_normalize_secret_token(part)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+def _add_brave_api_keys(keys, seen, blob, env_name, source):
+    """Append newly discovered Brave keys while remembering the first source."""
+    for key in _split_api_key_blob(blob):
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+        if source[0] is None:
+            source[0]=env_name
+
+def _list_brave_api_keys():
+    """Return configured Brave keys in round-robin order plus the primary source name."""
+    keys=[]
+    seen=set()
+    source=[None]
+
+    _add_brave_api_keys(keys, seen, os.environ.get("BRAVE_SEARCH_API_KEY", ""), "BRAVE_SEARCH_API_KEY", source)
+
+    numbered=[]
+    for name, value in os.environ.items():
+        match=_BRAVE_NUMBERED_KEY_RE.fullmatch(name)
+        if match:
+            numbered.append((int(match.group(1)), name, value))
+    for _, name, value in sorted(numbered, key=lambda item: item[0]):
+        _add_brave_api_keys(keys, seen, value, name, source)
+
+    _add_brave_api_keys(keys, seen, os.environ.get("BRAVE_SEARCH_API_KEYS", ""), "BRAVE_SEARCH_API_KEYS", source)
+
+    if not keys:
+        _add_brave_api_keys(keys, seen, os.environ.get("BRAVE_API_KEY", ""), "BRAVE_API_KEY", source)
+
+    return keys, source[0]
+
 def _resolve_brave_api_key():
-    """Return the preferred Brave key and its environment variable name."""
-    for env_name in ("BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"):
-        api_key=os.environ.get(env_name, "").strip()
-        if api_key:
-            return api_key, env_name
-    return None, None
+    """Return the first configured Brave key and its environment variable name."""
+    keys, source=_list_brave_api_keys()
+    if not keys:
+        return None, None
+    return keys[0], source
+
+def _select_brave_api_key():
+    """Return the next Brave key using a cross-process round-robin counter."""
+    keys, source=_list_brave_api_keys()
+    if not keys:
+        return None, None
+    if len(keys) == 1:
+        return keys[0], source
+    return keys[_next_brave_key_index(len(keys))], source
 
 def _engine_configured_via(engine):
     """Return the active environment variable(s) satisfying an engine."""
@@ -2426,13 +2537,16 @@ def get_diagnostics(config=None, include_engines=True):
             "configured_rps": _brave_requests_per_second(fetch_config),
             "subscription_cap_rps": BRAVE_SEARCH_MAX_RPS,
             "shared_across_local_processes": fcntl is not None,
+            "key_count": 0,
+            "round_robin": False,
+            "combined_cap_rps": 0,
         },
         "dependencies": dependencies,
         "environment": {
-            "BRAVE_API_KEY": bool(os.environ.get("BRAVE_API_KEY")),
-            "BRAVE_SEARCH_API_KEY": bool(os.environ.get("BRAVE_SEARCH_API_KEY")),
-            "OPENROUTER_API_KEY": bool(os.environ.get("OPENROUTER_API_KEY")),
-            "CCSEARCH_API_KEY": bool(os.environ.get("CCSEARCH_API_KEY")),
+            "BRAVE_API_KEY": bool(_normalize_secret_token(os.environ.get("BRAVE_API_KEY", ""))),
+            "BRAVE_SEARCH_API_KEY": False,
+            "OPENROUTER_API_KEY": bool(_normalize_secret_token(os.environ.get("OPENROUTER_API_KEY", ""))),
+            "CCSEARCH_API_KEY": bool(_normalize_secret_token(os.environ.get("CCSEARCH_API_KEY", ""))),
         },
         "fetch": {
             "flaresolverr_configured": bool(fetch_config.get("Fetch", "flaresolverr_url", fallback="").strip()),
@@ -2442,6 +2556,13 @@ def get_diagnostics(config=None, include_engines=True):
             "max_workers": fetch_config.getint("Batch", "max_workers", fallback=4),
         },
     }
+    brave_keys, brave_source=_list_brave_api_keys()
+    per_key_rps=_brave_requests_per_second(fetch_config)
+    diagnostics["brave_rate_limit"]["key_count"]=len(brave_keys)
+    diagnostics["brave_rate_limit"]["round_robin"]=len(brave_keys) > 1
+    diagnostics["brave_rate_limit"]["combined_cap_rps"]=per_key_rps * len(brave_keys)
+    diagnostics["brave_rate_limit"]["source"]=brave_source
+    diagnostics["environment"]["BRAVE_SEARCH_API_KEY"]=bool(brave_keys) and brave_source != "BRAVE_API_KEY"
     if include_engines:
         diagnostics["engines"] = list_engines()
     return diagnostics
@@ -2753,7 +2874,7 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
         raise ValueError(error)
 
     if engine == "brave":
-        api_key, _ = _resolve_brave_api_key()
+        api_key, _ = _select_brave_api_key()
         if not api_key:
             raise RuntimeError("BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY fallback) environment variable not found.")
         return perform_brave_search(query, api_key, config, offset=offset)
@@ -2765,14 +2886,14 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
         return perform_perplexity_search(query, api_key, config)
 
     if engine == "both":
-        brave_api_key, _ = _resolve_brave_api_key()
+        brave_api_key, _ = _select_brave_api_key()
         perplexity_api_key = os.environ.get("OPENROUTER_API_KEY")
         if not brave_api_key or not perplexity_api_key:
             raise RuntimeError("A Brave key (BRAVE_SEARCH_API_KEY preferred, BRAVE_API_KEY fallback) and OPENROUTER_API_KEY are required for 'both' engine.")
         return perform_both_search(query, brave_api_key, perplexity_api_key, config, offset=offset)
 
     if engine == "llm-context":
-        api_key, _ = _resolve_brave_api_key()
+        api_key, _ = _select_brave_api_key()
         if not api_key:
             raise RuntimeError("BRAVE_SEARCH_API_KEY (or BRAVE_API_KEY fallback) environment variable not found.")
         return perform_llm_context_search(query, api_key, config)

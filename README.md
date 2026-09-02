@@ -40,7 +40,8 @@ Search-style engines also normalize their output for downstream agents:
    *(Ensure `~/.local/bin` is in your environment's PATH so you can just run `ccsearch` from anywhere)*
 5. Set your Environment Variables:
    - For all Brave-backed engines: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"`
-   - `brave`, the Brave side of `both`, and `llm-context` all prefer `BRAVE_SEARCH_API_KEY`. The legacy `BRAVE_API_KEY` remains a compatibility fallback only when the Search key is unset.
+   - To rotate across multiple Brave Search subscriptions, keep the original key first and add the rest with `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, a comma-separated `BRAVE_SEARCH_API_KEY`, or `BRAVE_SEARCH_API_KEYS`.
+   - `brave`, the Brave side of `both`, and `llm-context` all prefer `BRAVE_SEARCH_API_KEY`. The legacy `BRAVE_API_KEY` remains a compatibility fallback only when no Search key is set. Each live Brave request uses the next key; cache hits do not rotate, and retries of the same request keep the same key.
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
 ### Fetch Document Support
@@ -502,7 +503,7 @@ The tool automatically detects Cloudflare challenges by checking for:
 You can deeply customize tool behavior by adjusting `config.ini`:
 
 ### `[Brave]`
-- **`requests_per_second`**: Combined local limit for Brave Web Search and LLM Context (Default: `1`, hard-capped at the Search plan's `50` RPS). CLI, HTTP API, MCP, batch workers, and retries coordinate through one cross-process limiter on this host. Other devices using the same Brave subscription are outside this limiter.
+- **`requests_per_second`**: Per-key local limit for Brave Web Search and LLM Context (Default: `1`, hard-capped at the Search plan's `50` RPS). CLI, HTTP API, MCP, batch workers, and retries coordinate through one cross-process limiter on this host, with a separate 1-second window per Brave key. Other devices using the same Brave subscription are outside this limiter.
 - **`count`**: Number of results to fetch per request (Default: `10`).
 - **`safesearch`**: Content filtering level: `off`, `moderate`, or `strict`.
 - **`freshness`**: Filter by time: `pd` (Past 24h), `pw` (Past week), `pm` (Past month), `py` (Past year). Leave blank for no limit.
@@ -560,7 +561,7 @@ ccsearch "anthropic claude 3.5 sonnet release date" -e brave --format json
 ```bash
 ccsearch "React hooks best practices" -e llm-context --format json
 ```
-*Use this when you need pre-extracted web content optimized for LLM grounding. Returns smart chunks (text, tables, code blocks, structured data) from multiple sources in a single call — far more token-efficient than fetching pages individually. Like every Brave-backed engine, it prefers `BRAVE_SEARCH_API_KEY` and falls back to `BRAVE_API_KEY` only when the Search key is unset.*
+*Use this when you need pre-extracted web content optimized for LLM grounding. Returns smart chunks (text, tables, code blocks, structured data) from multiple sources in a single call — far more token-efficient than fetching pages individually. Like every Brave-backed engine, it prefers `BRAVE_SEARCH_API_KEY`, can round-robin extra Search keys, and falls back to `BRAVE_API_KEY` only when no Search key is set.*
 
 **Both Engines Example:**
 ```bash
