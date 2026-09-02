@@ -293,6 +293,6 @@ Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 - Use `/batch` when you have several independent lookups/fetches and want one network round-trip.
 - Treat any fetch payload containing `error` as failed. Check `status_code`, `final_url`, and non-empty extracted content before relying on a page. PDF conversion is supported by the standard server install; JavaScript apps or empty rendered pages may require an interactive browser.
 - The server handles all API keys, rate limits, and caching internally.
-- Server-side Brave engines prefer `BRAVE_SEARCH_API_KEY`, round-robin extra Search keys, fall back to `BRAVE_API_KEY` only when needed, and apply a local per-key limiter capped at 50 RPS.
+- Server-side Brave engines prefer `BRAVE_SEARCH_API_KEY`, round-robin however many extra Search keys are configured, fall back to `BRAVE_API_KEY` only when needed, and apply a local per-key limiter capped at 50 RPS.
 - Cached results can be read for at most 90 days. Beginning on day 91, result files and orphaned semantic-index entries are deleted by server maintenance.
 - ccsearch best practice: brave first → fetch original pages → multiple keyword angles → llm-context for long docs → perplexity last as sanity check only. Never use perplexity as primary because perplexity tends to hallucinate more than other engines.

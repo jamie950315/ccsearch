@@ -41,11 +41,11 @@ Cache freshness defaults to 90 days and cannot exceed 90 days. A shorter caller-
 
 ### Search Engines
 
-- `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY`, round-robin any extra Search keys, and fall back to `BRAVE_API_KEY` only when no Search key is set
+- `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY`, round-robin however many extra Search keys are configured, and fall back to `BRAVE_API_KEY` only when no Search key is set
 - `perplexity` uses OpenRouter
 - `both` runs Brave and Perplexity concurrently and preserves partial failures
 
-All Brave attempts, including retries, share a cross-process limiter. Each Brave key has its own window, capped at 50 RPS per key, across the local CLI, HTTP API, and MCP services. Extra keys are selected round-robin for each live request. The limiter cannot account for other devices using the same Brave subscription.
+All Brave attempts, including retries, share a cross-process limiter. Each Brave key has its own window, capped at 50 RPS per key, across the local CLI, HTTP API, and MCP services. Extra keys are selected round-robin for each live request, using however many keys are configured rather than a fixed count of three. The limiter cannot account for other devices using the same Brave subscription.
 
 Search-style engines normalize output for downstream agents: cleaned text, `hostname`, `rank`, host summaries, optional `host_filtering`, optional `result_limiting`, `cache_status`, and `duration_ms`.
 
@@ -152,7 +152,7 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 - Never print, commit, or paste values from `.env`, `.api_key`, `config.ini`, Cloudflare credentials, or authenticated MCP URLs.
 - `.env`, `.api_key`, and `config.ini` must remain mode `0600`; all three are ignored by Git and may contain deployment-specific values.
 - The Python programs do not load dotenv files themselves. systemd loads `.env`; for manual runs, export the variables in the shell first.
-- Every Brave-backed engine prefers `BRAVE_SEARCH_API_KEY`, plus optional `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, or `BRAVE_SEARCH_API_KEYS`. `BRAVE_API_KEY` is used only as a compatibility fallback when no Search key is set. `both` additionally requires `OPENROUTER_API_KEY`.
+- Every Brave-backed engine prefers `BRAVE_SEARCH_API_KEY`, plus any number of extra keys from `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, `BRAVE_SEARCH_API_KEY_4`, later numbered variables, a comma-separated `BRAVE_SEARCH_API_KEY`, or `BRAVE_SEARCH_API_KEYS`. `BRAVE_API_KEY` is used only as a compatibility fallback when no Search key is set. `both` additionally requires `OPENROUTER_API_KEY`.
 - `CCSEARCH_API_KEY` from the environment takes precedence over `.api_key`. Both servers read the key at process startup, so changing it requires service restarts.
 - Optional port overrides: `CCSEARCH_PORT` and `CCSEARCH_MCP_PORT`.
 - MCP authentication embeds the shared key in the URL path. Uvicorn, systemd journal, proxies, and client logs can record that path. Do not show raw MCP access logs; redact the first path segment. AI assistants must never rotate the shared key autonomously. If the key is exposed in output during coding, stop reproducing it, redact it from subsequent output, notify the user, and ask whether they want it rotated. Rotate it only after explicit user approval.

@@ -40,7 +40,7 @@ Search-style engines also normalize their output for downstream agents:
    *(Ensure `~/.local/bin` is in your environment's PATH so you can just run `ccsearch` from anywhere)*
 5. Set your Environment Variables:
    - For all Brave-backed engines: `export BRAVE_SEARCH_API_KEY="your_brave_search_plan_key"`
-   - To rotate across multiple Brave Search subscriptions, keep the original key first and add the rest with `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, a comma-separated `BRAVE_SEARCH_API_KEY`, or `BRAVE_SEARCH_API_KEYS`.
+   - Extra Brave Search keys rotate automatically for any count, not just three. Keep the original key first, then add `BRAVE_SEARCH_API_KEY_2`, `BRAVE_SEARCH_API_KEY_3`, `BRAVE_SEARCH_API_KEY_4`, and so on. You can also put several keys in one comma-separated `BRAVE_SEARCH_API_KEY` or in `BRAVE_SEARCH_API_KEYS`.
    - `brave`, the Brave side of `both`, and `llm-context` all prefer `BRAVE_SEARCH_API_KEY`. The legacy `BRAVE_API_KEY` remains a compatibility fallback only when no Search key is set. Each live Brave request uses the next key; cache hits do not rotate, and retries of the same request keep the same key.
    - For Perplexity: `export OPENROUTER_API_KEY="your_openrouter_api_key"`
 
@@ -354,6 +354,7 @@ curl https://ccsearch.0ruka.dev/diagnostics \
 The response includes:
 - dependency availability (`curl_cffi`, `fastembed`, `markitdown`, `mcp`)
 - environment-key presence as booleans
+- Brave key rotation state such as `key_count`, `round_robin`, per-key RPS, and `combined_cap_rps` (no secret values)
 - fetch runtime state such as `flaresolverr_configured` and `flaresolverr_mode`
 - batch runtime defaults such as `max_workers`
 - the current engine list
