@@ -14,27 +14,27 @@ This file records repository-specific working rules and the verified deployment 
 
 ## Verified Deployment
 
-Snapshot verified on 2026-09-01. The primary deployment is A1-US, an Ubuntu 24.04 ARM64 Oracle A1 instance. The Raspberry Pi 5 checkout is a cold standby: its API and MCP services are disabled and inactive. Keep its code current and preserve its Pi-specific untracked configuration and secrets, but do not start its services unless the user explicitly chooses to fail over.
+Snapshot verified on 2026-09-01. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby with its API and MCP services disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
-| HTTP API | `ccsearch-api.service`, enabled and running as `ubuntu` on A1-US | `0.0.0.0:8888`, `https://ccsearch.0ruka.dev` |
-| MCP | `ccsearch-mcp.service`, enabled and running as `ubuntu` on A1-US | `0.0.0.0:8890`, `https://ccsearch-mcp.0ruka.dev` |
+| HTTP API | `ccsearch-api.service`, enabled and running as `ubuntu` on A1-JP | `0.0.0.0:8888`, `https://ccsearch.0ruka.dev` |
+| MCP | `ccsearch-mcp.service`, enabled and running as `ubuntu` on A1-JP | `0.0.0.0:8890`, `https://ccsearch-mcp.0ruka.dev` |
 | Cache cleanup | `ccsearch-cache-prune.timer`, enabled and active | Hourly; deletes result files beginning on day 91 |
 | FlareSolverr | Docker container `flaresolverr`, image `ghcr.io/flaresolverr/flaresolverr:latest` | `127.0.0.1:8191` only |
-| Public ingress | `cloudflared-a1.service`, enabled and running on A1-US | `/etc/cloudflared/a1-services.yml` maps the two public hostnames above to localhost |
+| Public ingress | `cloudflared-a1.service`, enabled and running on A1-JP | `/etc/cloudflared/a1-services.yml` maps the two public hostnames above to localhost |
 
-The A1-US API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/ubuntu/ccsearch`, load `/home/ubuntu/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
+The A1-JP API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/ubuntu/ccsearch`, load `/home/ubuntu/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
 
 The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
 
-FlareSolverr has no authentication and is intentionally bound to localhost only on A1-US. Preserve that binding in all future deployments. The Pi cold standby predates this hardening and must not become the public DNS target without re-checking its listener and firewall state.
+FlareSolverr has no authentication and is intentionally bound to localhost only on A1-JP. The checked-in compose file now enforces that loopback binding. A1-US keeps the same corrected compose file for rollback. The Pi cold standby predates this hardening and must not become the public DNS target without re-checking its listener and firewall state.
 
 ### Current Non-secret Runtime Configuration
 
 The live, untracked `config.ini` differs from `config.ini.example`:
 
-- Brave: one cross-process 50 RPS limit shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries on A1-US; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscription is not visible to this limiter.
+- Brave: one cross-process 50 RPS limit shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries on A1-JP; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscription is not visible to this limiter.
 - Perplexity: `perplexity/sonar-pro-search`, citations on, temperature 0.1, 16,384 max tokens, 2 retries.
 - LLM Context: 30 results, 16,384 max tokens, 20 URLs, lenient threshold, 2 retries.
 - Fetch: `http://localhost:8191/v1`, 60-second FlareSolverr timeout, fallback mode.

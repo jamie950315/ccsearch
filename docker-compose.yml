@@ -4,7 +4,7 @@ services:
     container_name: flaresolverr
     restart: unless-stopped
     ports:
-      - "8191:8191"
+      - "127.0.0.1:8191:8191"
     environment:
       - LOG_LEVEL=info
       - TZ=Asia/Taipei
