@@ -174,7 +174,7 @@ ccsearch can also be accessed remotely via the built-in HTTP API server (`api_se
 # Start the server (default port 8888)
 python3 api_server.py
 
-# Or via systemd (current Pi deployment)
+# Or via systemd (current server deployment)
 sudo systemctl start ccsearch-api
 ```
 
@@ -359,7 +359,7 @@ The response includes:
 
 ### Deployment
 
-The primary deployment runs on the A1-US Ubuntu ARM64 host. Its API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/ubuntu/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first. The previous Pi 5 deployment remains enabled as a rollback replica.
+The primary deployment runs on the A1-JP Ubuntu ARM64 host in Osaka. Its API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/ubuntu/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first. A1-US is the first rollback host and the Pi 5 checkout is a second cold standby; their ccsearch services and public connectors remain disabled until an explicit failover.
 
 `ccsearch-cache-prune.timer` runs the checked-in `systemd/ccsearch-cache-prune.service` hourly so files that have reached day 91 are removed even when they are never requested again.
 
@@ -372,13 +372,13 @@ sudo systemctl status ccsearch-api   # Check status
 journalctl -u ccsearch-api -f        # View logs
 ```
 
-The A1-US service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`. FlareSolverr is bound to `127.0.0.1:8191` on A1-US and is not publicly reachable.
+The A1-JP service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`. FlareSolverr is bound to `127.0.0.1:8191` by the checked-in compose file and is not publicly reachable.
 
 ---
 
 ## MCP Server
 
-`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the primary A1-US deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the primary A1-JP deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
 
 ### Architecture
 
@@ -473,7 +473,7 @@ The `fetch` engine uses a multi-layered approach to access protected websites:
    ```bash
    docker compose up -d flaresolverr
    ```
-   The included compose file publishes port `8191` on all interfaces. FlareSolverr has no authentication, so Internet-facing hosts should change the mapping to `127.0.0.1:8191:8191` or enforce an equivalent firewall rule.
+   The included compose file publishes port `8191` on `127.0.0.1` only. FlareSolverr has no authentication; preserve this loopback binding on Internet-facing hosts.
 2. Add the URL to your `config.ini`:
    ```ini
    [Fetch]
