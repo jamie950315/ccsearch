@@ -236,11 +236,9 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
   "cache_status": "disabled",
   "duration_ms": 123.45,
   "result_count": 2,
-  "source_count": 2,
   "results": [
-    {"url": "...", "title": "...", "hostname": "...", "rank": 1, "snippets": ["..."]}
-  ],
-  "sources": {"https://example.com": {"hostname": "example.com"}}
+    {"url": "...", "title": "...", "hostname": "...", "rank": 1, "snippet": "...", "snippets": ["..."]}
+  ]
 }
 ```
 

@@ -1082,7 +1082,8 @@ class TestPerformLLMContextSearch(unittest.TestCase):
                 "https://example.com/page1": {
                     "title": "Page One",
                     "hostname": "example.com",
-                    "age": ["Monday, January 15, 2024", "2024-01-15", "380 days ago"]
+                    "age": ["Monday, January 15, 2024", "2024-01-15", "380 days ago"],
+                    "snippet": "A short intro for page one"
                 },
                 "https://example.com/page2": {
                     "title": "Page Two",
@@ -1100,15 +1101,17 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         self.assertEqual(result["engine"], "llm-context")
         self.assertEqual(result["query"], "test query")
         self.assertEqual(result["result_count"], 2)
-        self.assertEqual(result["source_count"], 2)
+        self.assertNotIn("sources", result)
+        self.assertNotIn("source_count", result)
         self.assertEqual(len(result["results"]), 2)
         self.assertEqual(result["results"][0]["title"], "Page One")
         self.assertEqual(result["results"][0]["url"], "https://example.com/page1")
         self.assertEqual(result["results"][0]["snippets"], ["Snippet 1a", "Snippet 1b"])
+        self.assertEqual(result["results"][0]["snippet"], "A short intro for page one")
         self.assertEqual(result["results"][0]["hostname"], "example.com")
         self.assertEqual(result["results"][0]["age"], ["Monday, January 15, 2024", "2024-01-15", "380 days ago"])
         self.assertEqual(result["results"][0]["rank"], 1)
-        self.assertIn("https://example.com/page1", result["sources"])
+        self.assertNotIn("snippet", result["results"][1])
         self.assertEqual(result["result_hosts"], ["example.com"])
         self.assertEqual(result["result_host_count"], 1)
 
@@ -1139,7 +1142,8 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         })
         result = ccsearch.perform_llm_context_search("test query", "key123", self._default_config())
         self.assertEqual(result["result_count"], 1)
-        self.assertEqual(result["source_count"], 1)
+        self.assertNotIn("sources", result)
+        self.assertNotIn("source_count", result)
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["title"], "React Hooks")
         self.assertEqual(result["results"][0]["hostname"], "example.com")
@@ -1153,7 +1157,8 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
         result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
         self.assertEqual(result["results"], [])
-        self.assertEqual(result["sources"], {})
+        self.assertNotIn("sources", result)
+        self.assertNotIn("source_count", result)
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -1161,7 +1166,8 @@ class TestPerformLLMContextSearch(unittest.TestCase):
         mock_req.return_value = _mock_response(json_data={})
         result = ccsearch.perform_llm_context_search("test", "key", self._default_config())
         self.assertEqual(result["results"], [])
-        self.assertEqual(result["sources"], {})
+        self.assertNotIn("sources", result)
+        self.assertNotIn("source_count", result)
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -3072,8 +3078,9 @@ class TestSharedExecutionHelpers(unittest.TestCase):
         }
         result = ccsearch.execute_query('test', 'llm-context', self.config, exclude_hosts="other.example.com")
         self.assertEqual(result["result_count"], 1)
-        self.assertEqual(result["source_count"], 1)
-        self.assertEqual(list(result["sources"].keys()), ["https://docs.example.com/a"])
+        self.assertEqual(result["results"][0]["url"], "https://docs.example.com/a")
+        self.assertNotIn("sources", result)
+        self.assertNotIn("source_count", result)
         self.assertEqual(result["host_filtering"]["removed_results"], 1)
 
     def test_validate_execution_options_rejects_host_filters_for_unsupported_engine(self):
@@ -3424,7 +3431,7 @@ class TestMainCLI(unittest.TestCase):
         """BRAVE_SEARCH_API_KEY takes priority over BRAVE_API_KEY."""
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
-            "results": [], "sources": {}
+            "results": [],
         }
         out, err, code = self._run_main(
             ['test', '-e', 'llm-context', '--format', 'json'],
@@ -3439,7 +3446,7 @@ class TestMainCLI(unittest.TestCase):
         try:
             mock_lc.return_value = {
                 "engine": "llm-context", "query": "test",
-                "results": [], "sources": {}
+                "results": [],
             }
             out, err, code = self._run_main(
                 ['test', '-e', 'llm-context', '--format', 'json'],
@@ -3455,7 +3462,6 @@ class TestMainCLI(unittest.TestCase):
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
             "results": [{"url": "http://a", "title": "T", "snippets": ["S1"]}],
-            "sources": {"http://a": {"title": "T", "hostname": "a", "age": None}}
         }
         out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'json'],
                                          env={'BRAVE_API_KEY': 'k'})
@@ -3470,15 +3476,15 @@ class TestMainCLI(unittest.TestCase):
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
             "result_count": 1,
-            "source_count": 1,
-            "results": [{"rank": 1, "url": "http://a", "title": "Title Here", "hostname": "a", "age": "2d", "snippets": ["Snippet content"]}],
-            "sources": {"http://a": {}}
+            "results": [{"rank": 1, "url": "http://a", "title": "Title Here", "hostname": "a", "age": "2d", "snippet": "Short intro", "snippets": ["Snippet content"]}],
         }
         out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'text'],
                                          env={'BRAVE_API_KEY': 'k'})
         self.assertEqual(code, 0)
         self.assertIn("LLM Context Results for: test", out)
-        self.assertIn("Results: 1 | Sources: 1", out)
+        self.assertIn("Results: 1", out)
+        self.assertNotIn("Sources:", out)
+        self.assertIn("Short intro", out)
         self.assertIn("Age: 2d", out)
         self.assertIn("Title Here", out)
         self.assertIn("Snippet content", out)
@@ -3487,7 +3493,7 @@ class TestMainCLI(unittest.TestCase):
     def test_llm_context_text_empty_results(self, mock_lc):
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
-            "results": [], "sources": {}
+            "results": [],
         }
         out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'text'],
                                          env={'BRAVE_API_KEY': 'k'})
@@ -4904,7 +4910,6 @@ class TestMcpServerTools(unittest.TestCase):
         llm_result = {
             "engine": "llm-context", "query": "q",
             "results": [{"url": "http://x", "title": "T", "snippets": ["S"]}],
-            "sources": {}
         }
         with patch('ccsearch.perform_llm_context_search', return_value=llm_result):
             with patch('ccsearch.write_to_cache') as mock_write:
@@ -4924,7 +4929,8 @@ class TestMcpServerTools(unittest.TestCase):
         cached = {
             "engine": "llm-context", "query": "q",
             "results": [{"url": "http://x", "title": "Cached", "snippets": ["S"]}],
-            "sources": {}
+            "sources": {"http://x": {"hostname": "x"}},
+            "source_count": 1,
         }
         with patch('ccsearch.read_from_cache', return_value=cached):
             with patch('ccsearch.perform_llm_context_search') as mock_lc:
@@ -4932,6 +4938,11 @@ class TestMcpServerTools(unittest.TestCase):
                     ['q', '-e', 'llm-context', '--cache', '--format', 'json'],
                     env={'BRAVE_API_KEY': 'test-key'})
         mock_lc.assert_not_called()
+        self.assertEqual(code, 0)
+        data=json.loads(out)
+        self.assertNotIn("sources", data)
+        self.assertNotIn("source_count", data)
+        self.assertEqual(data["results"][0]["title"], "Cached")
         data = json.loads(out)
         self.assertTrue(data.get("_from_cache"))
         self.assertEqual(data["results"][0]["title"], "Cached")

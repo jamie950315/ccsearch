@@ -768,12 +768,6 @@ def _apply_host_filters(result, engine, include_hosts=None, exclude_hosts=None):
         items, removed=_filter_result_items_by_host(filtered.get("results", []), include_hosts, exclude_hosts)
         filtered["results"]=_annotate_rank(items)
         filtered["result_count"]=len(filtered["results"])
-        kept_urls={item.get("url") for item in filtered["results"] if isinstance(item, dict) and item.get("url")}
-        filtered["sources"]={
-            url: meta for url, meta in (filtered.get("sources") or {}).items()
-            if url in kept_urls
-        }
-        filtered["source_count"]=len(filtered["sources"])
         filtered["result_hosts"]=_collect_hostnames(filtered["results"])
         filtered["result_host_count"]=len(filtered["result_hosts"])
         host_filtering["removed_results"]=removed
@@ -817,12 +811,6 @@ def _apply_result_limit(result, engine, result_limit=None):
         result_limiting["removed_results"]=max(0, len(items) - len(trimmed))
         limited["results"]=_annotate_rank(trimmed)
         limited["result_count"]=len(limited["results"])
-        kept_urls={item.get("url") for item in limited["results"] if isinstance(item, dict) and item.get("url")}
-        limited["sources"]={
-            url: meta for url, meta in (limited.get("sources") or {}).items()
-            if url in kept_urls
-        }
-        limited["source_count"]=len(limited["sources"])
         limited["result_hosts"]=_collect_hostnames(limited["results"])
         limited["result_host_count"]=len(limited["result_hosts"])
     elif engine == "both":
@@ -1080,9 +1068,11 @@ def perform_llm_context_search(query, api_key, config):
     for item in grounding.get("generic", []):
         result_url=item.get("url")
         source_meta=sources.get(result_url, {}) if result_url else {}
-        results.append({
+        if not isinstance(source_meta, dict):
+            source_meta={}
+        entry={
             "url": result_url,
-            "title": _clean_api_text(item.get("title")),
+            "title": _clean_api_text(item.get("title") or source_meta.get("title")),
             "hostname": source_meta.get("hostname") or (urlparse(result_url).hostname if result_url else None),
             "age": source_meta.get("age"),
             "snippets": [
@@ -1091,16 +1081,18 @@ def perform_llm_context_search(query, api_key, config):
                 for cleaned in [_clean_api_text(snippet, preserve_newlines=True)]
                 if cleaned
             ]
-        })
+        }
+        short=_clean_api_text(source_meta.get("snippet"), preserve_newlines=True)
+        if short:
+            entry["snippet"]=short
+        results.append(entry)
 
     results=_annotate_rank(_dedupe_result_items(results))
     result={
         "engine": "llm-context",
         "query": query,
         "result_count": len(results),
-        "source_count": len(sources),
         "results": results,
-        "sources": sources,
     }
     hosts=_collect_hostnames(results)
     if hosts:
@@ -2951,6 +2943,9 @@ def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=DEF
         result=dict(result)
         result=_apply_host_filters(result, engine, include_hosts=normalized_include, exclude_hosts=normalized_exclude)
         result=_apply_result_limit(result, engine, result_limit=normalized_result_limit)
+        if engine == "llm-context":
+            result.pop("sources", None)
+            result.pop("source_count", None)
         result["cache_status"]=cache_status
         result["duration_ms"]=round((time.time() - started) * 1000, 2)
     return result
@@ -3196,13 +3191,15 @@ def main():
                     print(f"[Brave error: {result['brave_error']}]")
             elif args.engine == "llm-context":
                 print(f"LLM Context Results for: {args.query}")
-                print(f"Results: {result.get('result_count', len(result['results']))} | Sources: {result.get('source_count', len(result.get('sources', {})))}\n")
+                print(f"Results: {result.get('result_count', len(result['results']))}\n")
                 for res in result["results"]:
                     hostname = f" [{res['hostname']}]" if res.get("hostname") else ""
                     print(f"{res.get('rank', '?')}. {res['title']}{hostname}")
                     print(f"   URL: {res['url']}")
                     if res.get("age") is not None:
                         print(f"   Age: {res['age']}")
+                    if res.get("snippet"):
+                        print(f"   {res['snippet']}")
                     for snippet in res.get("snippets", []):
                         print(f"   > {snippet}")
                     print()

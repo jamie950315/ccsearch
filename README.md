@@ -11,10 +11,10 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 
 Search-style engines also normalize their output for downstream agents:
 - Brave results include `hostname`, strip inline HTML tags, decode HTML entities, and deduplicate repeated URLs.
-- LLM Context results include `hostname` and `age` from Brave's `sources` payload when available, plus cleaned snippet text.
+- LLM Context results include `hostname` and `age` when available, cleaned snippet chunks, and any unique short `snippet` from Brave. The duplicate top-level `sources` catalog is omitted.
 - Perplexity responses preserve normalized `citations` when the upstream model returns them.
 - `both` preserves partial-failure visibility through `brave_error` or `perplexity_error` fields when one backend fails, and forwards `perplexity_citations` when available.
-- Search results also carry stable positional metadata such as `rank`, `result_count`, and `brave_result_count` / `source_count` where relevant.
+- Search results also carry stable positional metadata such as `rank`, `result_count`, and `brave_result_count` where relevant.
 
 ## Requirements & Setup
 
