@@ -414,7 +414,7 @@ Streamable HTTP: https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/mcp
 
 Requests to any other path (missing or incorrect key) receive a `401 Unauthorized` response.
 
-The key-bearing path can appear in Uvicorn, systemd, proxy, and client access logs. Treat complete MCP URLs as secrets, redact the first path segment before sharing logs, and rotate the key if such a URL is exposed.
+Uvicorn access logging is disabled, but the key-bearing path can still appear in proxy and client logs. Treat complete MCP URLs as secrets and redact the first path segment before sharing logs. Only rotate a key after explicit operator approval.
 
 ### Client Configuration
 
@@ -454,6 +454,7 @@ async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as 
 ### Deployment
 
 - **Runtime**: Python 3 with `mcp>=1.26.0,<2` (FastMCP imports used by this project are not compatible with MCP 2.x)
+- **Verified 2026-09-08**: 480 tests pass on Mac and A1-JP; public search/fetch, browser extraction, exact/semantic cache, batch isolation, and both MCP transports pass. The API/MCP unit files have a pre-existing pending systemd reload, left unapplied by this code release; inspect host changes before reloading. MCP 1.26 emits an upstream Pydantic startup warning, but both transports work.
 - **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
 - **Systemd service**: `ccsearch-mcp.service`
 - **Cloudflare Tunnel**: `ccsearch-mcp.0ruka.dev → localhost:8890`

@@ -118,7 +118,7 @@ Keep the MCP server thin and forward into shared execution logic.
 
 ## Verified Deployment
 
-Snapshot verified on 2026-09-01, with the Pi5 FlareSolverr binding re-checked on 2026-09-03 and Brave Search key round-robin verified on 2026-09-03. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby: its API and MCP services remain disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
+Runtime and public routes re-verified on 2026-09-08 after the review hardening release. All 480 tests pass on Mac and A1-JP, including loopback HTTP/PDF and both MCP transports. Public Brave, LLM Context, combined Perplexity/Brave, direct/browser fetch, exact/semantic cache, batch isolation/deduplication, preserved HTTP 404, and SSE/Streamable HTTP calls pass. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby: its API and MCP services remain disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
 
 | Component | Live state | Binding / public route |
 | --- | --- | --- |
@@ -131,6 +131,8 @@ Snapshot verified on 2026-09-01, with the Pi5 FlareSolverr binding re-checked on
 The A1-JP API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/ubuntu/ccsearch`, load `/home/ubuntu/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
 
 The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
+
+Operational notes from the 2026-09-08 verification: API/MCP report `NeedDaemonReload=yes` for pre-existing unit-file changes; this release does not alter or reload those units. Running user/directory/restart policy agree with disk, services have zero automatic restarts, and public checks pass. Review the remaining unit directives before applying a host-wide reload. MCP 1.26 also emits a Pydantic `IncompleteFieldDefinitionWarning` at startup; both transports are verified despite that upstream warning.
 
 FlareSolverr has no authentication and is bound to localhost only. The checked-in compose file publishes `127.0.0.1:8191:8191`. A1-JP, the A1-US rollback copy, and Pi5 all have that loopback binding. On 2026-09-03, Pi5's running `flaresolverr` container was listening on `127.0.0.1:8191` only; its ccsearch API and MCP services remained disabled. Do not publish port `8191` on all interfaces if compose is recreated.
 
