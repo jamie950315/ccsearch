@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ccsearch import (
     load_config,
     load_api_key,
-    mask_secret,
     execute_batch,
     execute_query,
     get_diagnostics,
@@ -34,7 +33,7 @@ app = Flask(__name__)
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".api_key")
 API_KEY = load_api_key(KEY_FILE, create_if_missing=True)
-print(f"[ccsearch-api] API key loaded from {'environment' if os.environ.get('CCSEARCH_API_KEY') else KEY_FILE}: {mask_secret(API_KEY)}")
+print(f"[ccsearch-api] API key loaded from {'environment' if os.environ.get('CCSEARCH_API_KEY') else KEY_FILE}; authentication enabled")
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ def require_api_key(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         key = request.headers.get("X-API-Key", "")
-        if not secrets.compare_digest(key, API_KEY):
+        if not secrets.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8")):
             return jsonify({"error": "Unauthorized", "message": "Invalid or missing X-API-Key header"}), 401
         return f(*args, **kwargs)
     return decorated
@@ -78,11 +77,15 @@ def search():
       - exclude_hosts (list[str] or comma-separated str, optional): host deny-list for brave/both/llm-context
     """
     data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "Bad Request", "message": "JSON body required"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad Request", "message": "JSON object body required"}), 400
 
-    query = data.get("query", "").strip()
-    engine = data.get("engine", "").strip().lower()
+    query = data.get("query", "")
+    engine = data.get("engine", "")
+    if not isinstance(query, str) or not isinstance(engine, str):
+        return jsonify({"error": "Bad Request", "message": "'query' and 'engine' must be strings"}), 400
+    query = query.strip()
+    engine = engine.strip().lower()
 
     if not query:
         return jsonify({"error": "Bad Request", "message": "'query' is required"}), 400
@@ -118,6 +121,8 @@ def search():
         include_hosts=include_hosts,
         exclude_hosts=exclude_hosts,
         result_limit=result_limit,
+        cache=use_cache,
+        semantic_cache=use_semantic,
     )
     if option_error:
         return jsonify({"error": "Bad Request", "message": option_error}), 400
@@ -144,8 +149,10 @@ def search():
     except ValueError as e:
         return jsonify({"error": "Bad Request", "message": str(e)}), 400
     except RuntimeError as e:
+        app.logger.exception("Search execution failed")
         return jsonify({"error": "Server Error", "message": str(e)}), 500
     except Exception as e:
+        app.logger.exception("Unexpected search failure")
         return jsonify({"error": "Search Failed", "message": str(e)}), 500
 
 
@@ -154,8 +161,8 @@ def search():
 def batch():
     """Execute multiple requests in one HTTP round-trip."""
     data = request.get_json(silent=True)
-    if data is None:
-        return jsonify({"error": "Bad Request", "message": "JSON body required"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad Request", "message": "JSON object body required"}), 400
 
     requests_payload = data.get("requests")
     defaults = data.get("defaults", {})
@@ -168,6 +175,7 @@ def batch():
     except ValueError as e:
         return jsonify({"error": "Bad Request", "message": str(e)}), 400
     except Exception as e:
+        app.logger.exception("Unexpected batch failure")
         return jsonify({"error": "Batch Failed", "message": str(e)}), 500
 
 

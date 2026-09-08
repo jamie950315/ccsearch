@@ -618,3 +618,24 @@ If you deploy ccsearch as a self-hosted HTTP server, you can install it as a **C
 Once installed, Claude Code will automatically invoke `/ccsearch` whenever it needs to search the web, fetch URLs, or get LLM-optimized context — routing all requests through your server via `curl`.
 
 The skill template is located at [`skills/SKILL.md`](skills/SKILL.md).
+
+## Failure visibility and verification
+
+Inputs use their documented JSON types: booleans must be `true`/`false`, integer options must be integers, and thresholds must be finite numbers in [0, 1]. Fetch URLs require HTTP(S), a hostname, and a valid port. Invalid batch items produce per-item errors without aborting valid requests. CLI commands exit nonzero for failed or partially failed results, including batches; JSON output remains available for inspection.
+
+Failed or partially failed responses are never reused or stored in either cache. Fetch cache normalization preserves meaningful path separators, path parameters, IPv6 hosts, and repeated query-value order. Semantic index updates are process-safe; unavailable candidates do not trigger embedding work. Broken embedding runtimes raise their original errors rather than silently becoming cache misses.
+
+Brave/OpenRouter error payloads and missing answer content are failures, not empty successful answers. `both` retains a successful side and reports the failed side; when both sides fail, the result also includes `error`. Invalid configured modes fail explicitly. FlareSolverr retries expected transport failures only, does not hide programming errors, and rejects unresolved challenges. Explicit `always` mode requires a configured URL. Binary conversion uses one MarkItDown path and rejects empty output.
+
+MCP runs blocking tools in a bounded worker pool, so a slow search does not freeze all client connections. Individual tool failures use MCP error signaling. Batch calls retain their per-item errors and summary. Uvicorn access logging is disabled to avoid recording key-bearing URLs; proxies and clients can still log them. Empty authentication files prevent startup, and concurrent first starts safely share one newly generated key.
+
+Run all unit, regression, and local transport tests with:
+
+```bash
+python3 -m py_compile ccsearch.py api_server.py mcp_server.py
+python3 -m unittest discover -v
+python3 ccsearch.py --doctor --format json
+python3 ccsearch.py --list-engines --format json
+```
+
+Tests isolate inherited provider credentials. Live upstream, public-route, and deployment checks are separate from this suite.

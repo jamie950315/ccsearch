@@ -262,6 +262,10 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 
 ## Error Handling
 
+Use documented JSON types: booleans are true/false, integer options are integers, and semantic thresholds are finite numbers in [0, 1]. Invalid batch items are isolated from valid items. Failed/partial responses are not cached. The combined engine preserves a successful side with an explicit side error; total failure includes a top-level error. HTTP total combined failures return 500.
+
+Explicit FlareSolverr mode requires a configured browser URL. Unresolved challenge pages and empty converted documents are failures, not successful content. Programming errors are surfaced rather than retried through another fetch method.
+
 Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 
 | Status | Meaning |

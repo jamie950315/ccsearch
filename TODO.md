@@ -34,8 +34,6 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 
 ## API / MCP / CLI
 
-- Validate `fetch` inputs with parsed `http`/`https` schemes and a hostname; the current shared validator only checks the string prefix.
-- Coerce malformed batch option types per item so one bad `cache_ttl`, `semantic_threshold`, or `offset` value cannot abort the whole batch before per-request isolation applies.
 - Audit external integration templates for `/batch` and `/diagnostics`; both checked-in skill files already include first-class examples.
 - Consider adding a dedicated `result_format` or `compact` mode for lighter agent payloads.
 - Consider exposing an explicit chunk-focused fetch mode for agent workflows that do not need the full `content` body.
@@ -43,7 +41,7 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 ## Operations
 
 - Keep FlareSolverr loopback-only on every host. A1-JP, the A1-US rollback copy, and Pi5 now bind `127.0.0.1:8191`; do not republish `0.0.0.0:8191` or `[::]:8191` if compose is recreated.
-- Replace MCP URL-path authentication with a mechanism that does not place the shared API key in access logs, or add reliable access-log redaction across Uvicorn and Cloudflare.
+- Replace MCP URL-path authentication with a mechanism that does not place the shared API key in proxy/client logs. Uvicorn access logging is already disabled.
 - Replace the Flask development server with a production WSGI/ASGI deployment setup.
   - Gunicorn/Uvicorn worker model
   - Clear service documentation for production mode

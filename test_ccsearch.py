@@ -23,6 +23,18 @@ import requests
 import ccsearch
 
 
+def setUpModule():
+    # Never let inherited production credentials enter mocked assertions or calls.
+    global _isolated_credentials
+    environment = {key: value for key, value in os.environ.items() if "API_KEY" not in key}
+    _isolated_credentials = patch.dict(os.environ, environment, clear=True)
+    _isolated_credentials.start()
+
+
+def tearDownModule():
+    _isolated_credentials.stop()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -186,7 +198,7 @@ class TestCacheKey(unittest.TestCase):
         self.assertEqual(len(name), 32)
 
     def test_fetch_url_cache_key_normalizes_tracking_params(self):
-        u1 = "HTTPS://Example.com/path/?b=2&utm_source=newsletter&a=1#fragment"
+        u1 = "HTTPS://Example.com/path?b=2&utm_source=newsletter&a=1#fragment"
         u2 = "https://example.com/path?a=1&b=2"
         self.assertEqual(
             ccsearch.get_cache_key(u1, 'fetch', None),
@@ -299,7 +311,7 @@ class TestReadWriteCache(unittest.TestCase):
     def test_fetch_cache_normalizes_equivalent_urls(self):
         data = {"engine": "fetch", "content": "same page"}
         ccsearch.write_to_cache(
-            'https://Example.com/path/?utm_source=x&b=2&a=1#frag',
+            'https://Example.com/path?utm_source=x&b=2&a=1#frag',
             'fetch',
             None,
             data,
@@ -317,7 +329,7 @@ class TestReadWriteCache(unittest.TestCase):
     def test_fetch_cache_hit_preserves_requested_url(self):
         data = {"engine": "fetch", "url": "https://example.com/original?utm_source=x", "content": "same page"}
         ccsearch.write_to_cache(
-            'https://Example.com/path/?utm_source=x&b=2&a=1#frag',
+            'https://Example.com/path?utm_source=x&b=2&a=1#frag',
             'fetch',
             None,
             data,
@@ -812,12 +824,13 @@ class TestPerformBraveSearch(unittest.TestCase):
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
-    def test_invalid_safesearch_not_in_params(self, mock_req, mock_sleep):
+    def test_invalid_safesearch_fails(self, mock_req, mock_sleep):
         mock_req.return_value = _mock_response(json_data={"web": {"results": []}})
         config = self._default_config()
         config.set('Brave', 'safesearch', 'INVALID')
-        ccsearch.perform_brave_search("test", "key", config)
-        self.assertNotIn('safesearch', mock_req.call_args.kwargs['params'])
+        with self.assertRaisesRegex(ValueError, 'safesearch'):
+            ccsearch.perform_brave_search("test", "key", config)
+        mock_req.assert_not_called()
 
     @patch('ccsearch.retry_request')
     def test_rate_limiting_callback(self, mock_req):
@@ -874,14 +887,14 @@ class TestPerformPerplexitySearch(unittest.TestCase):
     @patch('ccsearch.retry_request')
     def test_missing_choices_key(self, mock_req):
         mock_req.return_value = _mock_response(json_data={})
-        result = ccsearch.perform_perplexity_search("test", "key", self._default_config())
-        self.assertEqual(result["answer"], "No response content found.")
+        with self.assertRaisesRegex(RuntimeError, "no valid answer"):
+            ccsearch.perform_perplexity_search("test", "key", self._default_config())
 
     @patch('ccsearch.retry_request')
     def test_empty_choices_list(self, mock_req):
         mock_req.return_value = _mock_response(json_data={"choices": []})
-        result = ccsearch.perform_perplexity_search("test", "key", self._default_config())
-        self.assertEqual(result["answer"], "No response content found.")
+        with self.assertRaisesRegex(RuntimeError, "no valid answer"):
+            ccsearch.perform_perplexity_search("test", "key", self._default_config())
 
     @patch('ccsearch.retry_request')
     def test_custom_model_config(self, mock_req):
@@ -1244,12 +1257,13 @@ class TestPerformLLMContextSearch(unittest.TestCase):
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
-    def test_invalid_threshold_mode_not_in_params(self, mock_req, mock_sleep):
+    def test_invalid_threshold_mode_fails(self, mock_req, mock_sleep):
         mock_req.return_value = _mock_response(json_data={"grounding": {"generic": []}, "sources": {}})
         config = self._default_config()
         config.set('LLMContext', 'context_threshold_mode', 'INVALID')
-        ccsearch.perform_llm_context_search("test", "key", config)
-        self.assertNotIn('context_threshold_mode', mock_req.call_args.kwargs['params'])
+        with self.assertRaisesRegex(ValueError, 'context_threshold_mode'):
+            ccsearch.perform_llm_context_search("test", "key", config)
+        mock_req.assert_not_called()
 
     @patch('ccsearch.time.sleep')
     @patch('ccsearch.retry_request')
@@ -1690,7 +1704,7 @@ class TestDetectCloudflare(unittest.TestCase):
 
     def test_short_body_with_cfray(self):
         r = self._resp('short', content_len=500, headers={'cf-ray': '12345'})
-        self.assertTrue(ccsearch._detect_cloudflare(r))
+        self.assertFalse(ccsearch._detect_cloudflare(r))
 
     def test_short_body_without_cfray(self):
         r = self._resp('short', content_len=500, headers={})
@@ -1711,7 +1725,7 @@ class TestDetectCloudflare(unittest.TestCase):
 
     def test_1023_bytes_is_short(self):
         r = self._resp('x' * 1023, content_len=1023, headers={'cf-ray': 'abc'})
-        self.assertTrue(ccsearch._detect_cloudflare(r))
+        self.assertFalse(ccsearch._detect_cloudflare(r))
 
     def test_multiple_indicators_still_true(self):
         r = self._resp('<html><head><title>Just a moment...</title></head><body>Checking your browser cf-browser-verification challenge-platform</body></html>')
@@ -1764,7 +1778,7 @@ class TestSimpleFetch(unittest.TestCase):
     @patch('ccsearch.cffi_requests', create=True)
     def test_curl_cffi_path_4xx_no_retry(self, mock_cffi):
         mock_session = MagicMock()
-        err = Exception("400 Bad Request")
+        err = requests.exceptions.HTTPError("400 Bad Request")
         err.response = MagicMock(status_code=400)
         mock_session.get.side_effect = err
         mock_cffi.Session.return_value = mock_session
@@ -1778,7 +1792,7 @@ class TestSimpleFetch(unittest.TestCase):
     @patch('ccsearch.cffi_requests', create=True)
     def test_curl_cffi_path_retries_on_5xx(self, mock_cffi, mock_sleep):
         mock_session = MagicMock()
-        err = Exception("500 Server Error")
+        err = requests.exceptions.HTTPError("500 Server Error")
         err.response = MagicMock(status_code=500)
         mock_session.get.side_effect = err
         mock_cffi.Session.return_value = mock_session
@@ -2394,7 +2408,7 @@ class TestPerformFetch(unittest.TestCase):
 
     @patch('ccsearch._simple_fetch')
     def test_never_mode_direct_fails(self, mock_sf):
-        mock_sf.side_effect = Exception("connection refused")
+        mock_sf.side_effect = requests.exceptions.ConnectionError("connection refused")
         config = _make_config(flaresolverr_mode='never', flaresolverr_url='http://fs:8191/v1')
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2402,7 +2416,7 @@ class TestPerformFetch(unittest.TestCase):
 
     @patch('ccsearch._simple_fetch')
     def test_no_url_direct_fails(self, mock_sf):
-        mock_sf.side_effect = Exception("timeout")
+        mock_sf.side_effect = requests.exceptions.Timeout("timeout")
         config = _make_config(flaresolverr_url='')
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2421,7 +2435,7 @@ class TestPerformFetch(unittest.TestCase):
 
     @patch('ccsearch._flaresolverr_fetch')
     def test_always_mode_failure(self, mock_ff):
-        mock_ff.side_effect = Exception("FS timeout")
+        mock_ff.side_effect = requests.exceptions.Timeout("FS timeout")
         config = _make_config(flaresolverr_mode='always', flaresolverr_url='http://fs:8191/v1')
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2457,15 +2471,16 @@ class TestPerformFetch(unittest.TestCase):
         ccsearch.perform_fetch('http://x', config)
         mock_ff.assert_called_once_with('http://x', 'http://fs:8191/v1', 30000)
 
-    # ---- Mode: always but no URL → falls through to direct ----
+    # ---- Mode: always but no URL fails before making requests ----
 
     @patch('ccsearch._simple_fetch')
-    def test_always_mode_no_url_falls_to_direct(self, mock_sf):
+    def test_always_mode_no_url_fails(self, mock_sf):
         mock_sf.return_value = _mock_response(200,
             text='<html><head><title>D</title></head><body><p>Direct</p></body></html>')
         config = _make_config(flaresolverr_mode='always', flaresolverr_url='')
-        result = ccsearch.perform_fetch('http://x', config)
-        self.assertEqual(result["fetched_via"], "direct")
+        with self.assertRaisesRegex(ValueError, "flaresolverr_url is required"):
+            ccsearch.perform_fetch('http://x', config)
+        mock_sf.assert_not_called()
 
     # ---- Mode: fallback — direct succeeds, no CF ----
 
@@ -2516,7 +2531,7 @@ class TestPerformFetch(unittest.TestCase):
     def test_fallback_cf_detected_fs_fails(self, mock_sf, mock_ff):
         cf_html = '<html><head><title>Just a moment...</title></head><body>CF</body></html>'
         mock_sf.return_value = _mock_response(200, text=cf_html)
-        mock_ff.side_effect = Exception("FS down")
+        mock_ff.side_effect = requests.exceptions.ConnectionError("FS down")
         config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2592,8 +2607,8 @@ class TestPerformFetch(unittest.TestCase):
     @patch('ccsearch._flaresolverr_fetch')
     @patch('ccsearch._simple_fetch')
     def test_fallback_both_fail(self, mock_sf, mock_ff):
-        mock_sf.side_effect = Exception("direct error")
-        mock_ff.side_effect = Exception("fs error")
+        mock_sf.side_effect = requests.exceptions.ConnectionError("direct error")
+        mock_ff.side_effect = requests.exceptions.ConnectionError("fs error")
         config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2608,7 +2623,7 @@ class TestPerformFetch(unittest.TestCase):
         mock_sf.return_value = _mock_response(200, text=cf_html)
         config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='')
         result = ccsearch.perform_fetch('http://x', config)
-        # No fallback URL, so returns CF page content as-is
+        self.assertIn("Cloudflare challenge detected", result["error"])
         self.assertEqual(result["fetched_via"], "direct")
 
     # ---- Stderr messages ----
@@ -2644,7 +2659,7 @@ class TestPerformFetch(unittest.TestCase):
     @patch('ccsearch._flaresolverr_fetch')
     @patch('ccsearch._simple_fetch')
     def test_stderr_messages_direct_fail_fallback(self, mock_sf, mock_ff):
-        mock_sf.side_effect = Exception("conn refused")
+        mock_sf.side_effect = requests.exceptions.ConnectionError("conn refused")
         mock_ff.return_value = '<html><head><title>T</title></head><body>ok</body></html>'
         config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
         from io import StringIO
@@ -2690,7 +2705,7 @@ class TestPerformFetch(unittest.TestCase):
 
     @patch('ccsearch._simple_fetch')
     def test_result_has_error_field_on_failure(self, mock_sf):
-        mock_sf.side_effect = Exception("fail")
+        mock_sf.side_effect = requests.exceptions.ConnectionError("fail")
         config = _make_config()
         result = ccsearch.perform_fetch('http://x', config)
         self.assertIn("error", result)
@@ -2796,7 +2811,7 @@ class TestPerformFetch(unittest.TestCase):
 
     @patch('ccsearch._flaresolverr_fetch')
     @patch('ccsearch._simple_fetch')
-    def test_fallback_short_body_cfray(self, mock_sf, mock_ff):
+    def test_short_body_cfray_does_not_trigger_fallback(self, mock_sf, mock_ff):
         resp = _mock_response(200, text='short')
         resp.content = b'x' * 500
         resp.headers = {'cf-ray': 'abc'}
@@ -2804,7 +2819,8 @@ class TestPerformFetch(unittest.TestCase):
         mock_ff.return_value = '<html><head><title>OK</title></head><body>ok</body></html>'
         config = _make_config(flaresolverr_mode='fallback', flaresolverr_url='http://fs:8191/v1')
         result = ccsearch.perform_fetch('http://x', config)
-        self.assertEqual(result["fetched_via"], "flaresolverr")
+        self.assertEqual(result["fetched_via"], "direct")
+        mock_ff.assert_not_called()
 
 
 # ===========================================================================
@@ -3398,18 +3414,15 @@ class TestMainCLI(unittest.TestCase):
         call_config = mock_pf.call_args[0][1]
         self.assertEqual(call_config.get('Fetch', 'flaresolverr_mode'), 'always')
 
-    def test_flaresolverr_flag_no_url_warning(self):
-        """--flaresolverr with no URL should warn and still work."""
-        with patch('ccsearch.perform_fetch') as mock_pf, \
-             patch('ccsearch.load_config') as mock_cfg:
+    def test_flaresolverr_flag_no_url_fails(self):
+        """An explicitly requested browser must be configured."""
+        with patch('ccsearch.load_config') as mock_cfg:
             cfg = configparser.ConfigParser()
             cfg['Fetch'] = {'flaresolverr_url': '', 'flaresolverr_timeout': '60000', 'flaresolverr_mode': 'fallback'}
             mock_cfg.return_value = cfg
-            mock_pf.return_value = {"engine": "fetch", "url": "http://x", "title": "T",
-                                    "content": "C", "fetched_via": "direct"}
             out, err, code = self._run_main(['http://x', '-e', 'fetch', '--format', 'json', '--flaresolverr'])
-        self.assertIn("WARNING", err)
-        self.assertIn("no flaresolverr_url configured", err)
+        self.assertEqual(code, 1)
+        self.assertIn("flaresolverr_url", err)
 
     # ---- LLM Context engine ----
 
@@ -3834,7 +3847,7 @@ class TestComputeEmbedding(unittest.TestCase):
         with patch.dict('sys.modules', {'fastembed': None}):
             ccsearch._embedding_model = None
             # Simulate ImportError by patching the import
-            with patch('builtins.__import__', side_effect=ImportError("no fastembed")):
+            with patch('builtins.__import__', side_effect=ModuleNotFoundError("no fastembed", name="fastembed")):
                 # Force re-init
                 ccsearch._embedding_model = None
                 result = ccsearch._compute_embedding("test query")
@@ -3854,13 +3867,13 @@ class TestComputeEmbedding(unittest.TestCase):
         self.assertEqual(len(result), 384)
         self.assertIsInstance(result[0], float)
 
-    def test_returns_none_on_embed_exception(self):
+    def test_embed_exception_is_visible(self):
         mock_model = MagicMock()
         mock_model.embed.side_effect = RuntimeError("embed failed")
         ccsearch._embedding_model = mock_model
 
-        result = ccsearch._compute_embedding("test")
-        self.assertIsNone(result)
+        with self.assertRaisesRegex(RuntimeError, "embed failed"):
+            ccsearch._compute_embedding("test")
 
 
 class TestSemanticIndexIO(unittest.TestCase):
@@ -3886,11 +3899,11 @@ class TestSemanticIndexIO(unittest.TestCase):
     def test_save_and_load_roundtrip(self):
         index_path = os.path.join(self.tmpdir, 'semantic_index.json')
         with patch('ccsearch._semantic_index_path', return_value=index_path):
-            index = {"abc123": {"query": "test", "engine": "brave", "offset": None, "embedding": [0.1, 0.2]}}
+            index = {"00000000000000000000000000000002": {"query": "test", "engine": "brave", "offset": None, "embedding": [0.1, 0.2]}}
             ccsearch._save_semantic_index(index)
             loaded = ccsearch._load_semantic_index()
-        self.assertEqual(loaded["abc123"]["query"], "test")
-        self.assertEqual(loaded["abc123"]["embedding"], [0.1, 0.2])
+        self.assertEqual(loaded["00000000000000000000000000000002"]["query"], "test")
+        self.assertEqual(loaded["00000000000000000000000000000002"]["embedding"], [0.1, 0.2])
 
     def test_load_returns_empty_on_corrupt_file(self):
         index_path = os.path.join(self.tmpdir, 'semantic_index.json')
@@ -3925,7 +3938,7 @@ class TestReadFromSemanticCache(unittest.TestCase):
         self.assertEqual(sim, 0.0)
 
     def test_returns_none_when_embedding_fails(self):
-        index = {"key1": {"engine": "brave", "offset": None, "embedding": [0.5, 0.5]}}
+        index = {"00000000000000000000000000000001": {"engine": "brave", "offset": None, "embedding": [0.5, 0.5]}}
         with patch('ccsearch._load_semantic_index', return_value=index):
             with patch('ccsearch._compute_embedding', return_value=None):
                 result, sim = ccsearch.read_from_semantic_cache("query", "brave", None, 10, 0.9)
@@ -3935,7 +3948,7 @@ class TestReadFromSemanticCache(unittest.TestCase):
         import numpy as np
         emb = [1.0, 0.0, 0.0]
         cache_data = {"engine": "brave", "query": "original query", "results": []}
-        cache_key = "abc123"
+        cache_key = "00000000000000000000000000000002"
         self._write_cache_file(cache_key, cache_data)
 
         index = {cache_key: {"engine": "brave", "offset": None, "embedding": emb}}
@@ -3950,7 +3963,7 @@ class TestReadFromSemanticCache(unittest.TestCase):
         emb_stored = [1.0, 0.0]
         emb_query  = [0.0, 1.0]  # orthogonal => sim=0.0
         cache_data = {"engine": "brave", "results": []}
-        cache_key = "xyz789"
+        cache_key = "00000000000000000000000000000003"
         self._write_cache_file(cache_key, cache_data)
 
         index = {cache_key: {"engine": "brave", "offset": None, "embedding": emb_stored}}
@@ -3962,8 +3975,8 @@ class TestReadFromSemanticCache(unittest.TestCase):
 
     def test_skips_wrong_engine(self):
         emb = [1.0, 0.0]
-        index = {"k1": {"engine": "perplexity", "offset": None, "embedding": emb}}
-        self._write_cache_file("k1", {"engine": "perplexity"})
+        index = {"00000000000000000000000000000005": {"engine": "perplexity", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "perplexity"})
         with patch('ccsearch._load_semantic_index', return_value=index):
             with patch('ccsearch.get_cache_dir', return_value=self.tmpdir):
                 with patch('ccsearch._compute_embedding', return_value=emb):
@@ -3972,7 +3985,7 @@ class TestReadFromSemanticCache(unittest.TestCase):
 
     def test_skips_expired_entry(self):
         emb = [1.0, 0.0]
-        cache_key = "expired_key"
+        cache_key = "00000000000000000000000000000004"
         cache_file = self._write_cache_file(cache_key, {"engine": "brave", "results": []})
         # Set mtime to 20 minutes ago (TTL is 10 min)
         old_time = time.time() - 1200
@@ -4004,18 +4017,18 @@ class TestUpdateSemanticIndex(unittest.TestCase):
         with patch('ccsearch._compute_embedding', return_value=emb):
             with patch('ccsearch._load_semantic_index', return_value={}):
                 with patch('ccsearch._semantic_index_path', return_value=index_path):
-                    ccsearch.update_semantic_index("hello", "brave", None, "abc123.json")
+                    ccsearch.update_semantic_index("hello", "brave", None, "00000000000000000000000000000002.json")
 
         with open(index_path) as f:
             saved = json.load(f)
-        self.assertIn("abc123", saved)
-        self.assertEqual(saved["abc123"]["query"], "hello")
-        self.assertEqual(saved["abc123"]["embedding"], emb)
+        self.assertIn("00000000000000000000000000000002", saved)
+        self.assertEqual(saved["00000000000000000000000000000002"]["query"], "hello")
+        self.assertEqual(saved["00000000000000000000000000000002"]["embedding"], emb)
 
     def test_does_nothing_when_embedding_fails(self):
         with patch('ccsearch._compute_embedding', return_value=None):
             with patch('ccsearch._save_semantic_index') as mock_save:
-                ccsearch.update_semantic_index("hello", "brave", None, "abc123.json")
+                ccsearch.update_semantic_index("hello", "brave", None, "00000000000000000000000000000002.json")
         mock_save.assert_not_called()
 
 
@@ -4040,12 +4053,11 @@ class TestCosineSimEdgeCases(unittest.TestCase):
         v = [-1.0, -2.0, -3.0]
         self.assertAlmostEqual(ccsearch._cosine_sim(v, v), 1.0)
 
-    def test_unequal_length_truncates_to_shorter(self):
-        # zip() silently truncates — verify we get a result without crashing
+    def test_unequal_lengths_report_incompatible_embeddings(self):
         a = [1.0, 0.0, 0.0]
         b = [1.0, 0.0]
-        result = ccsearch._cosine_sim(a, b)
-        self.assertIsInstance(result, float)
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            ccsearch._cosine_sim(a, b)
 
     def test_large_values_no_overflow(self):
         a = [1e150, 1e150]
@@ -4105,12 +4117,12 @@ class TestComputeEmbeddingEdgeCases(unittest.TestCase):
         mock_import.assert_not_called()
         self.assertIsNone(result)
 
-    def test_embed_returns_non_iterable_raises_caught(self):
+    def test_embed_returns_non_iterable_raises(self):
         mock_model = MagicMock()
         mock_model.embed.return_value = None  # next(None) raises TypeError
         ccsearch._embedding_model = mock_model
-        result = ccsearch._compute_embedding("test")
-        self.assertIsNone(result)
+        with self.assertRaises(TypeError):
+            ccsearch._compute_embedding("test")
 
 
 class TestSemanticIndexEdgeCases(unittest.TestCase):
@@ -4126,12 +4138,12 @@ class TestSemanticIndexEdgeCases(unittest.TestCase):
         return os.path.join(self.tmpdir, 'semantic_index.json')
 
     def test_save_unicode_content(self):
-        idx = {"key1": {"query": "日本語テスト 한국어", "engine": "brave",
+        idx = {"00000000000000000000000000000001": {"query": "日本語テスト 한국어", "engine": "brave",
                         "offset": None, "embedding": [0.1, 0.2]}}
         with patch('ccsearch._semantic_index_path', return_value=self._index_path()):
             ccsearch._save_semantic_index(idx)
             loaded = ccsearch._load_semantic_index()
-        self.assertEqual(loaded["key1"]["query"], "日本語テスト 한국어")
+        self.assertEqual(loaded["00000000000000000000000000000001"]["query"], "日本語テスト 한국어")
 
     def test_load_empty_file_returns_empty_dict(self):
         p = self._index_path()
@@ -4194,8 +4206,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_missing_embedding_field_is_skipped(self):
         cache_data = {"engine": "brave", "results": []}
-        self._write_cache_file("k1", cache_data)
-        index = {"k1": {"engine": "brave", "offset": None}}  # no "embedding" key
+        self._write_cache_file("00000000000000000000000000000005", cache_data)
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None}}  # no "embedding" key
         p1, p2, p3 = self._patch(index, [1.0, 0.0])
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
@@ -4203,8 +4215,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_empty_list_embedding_is_skipped(self):
         # Empty list is falsy — entry should be skipped
-        self._write_cache_file("k1", {"engine": "brave"})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": []}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave"})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": []}}
         p1, p2, p3 = self._patch(index, [1.0, 0.0])
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
@@ -4212,7 +4224,7 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_orphaned_index_entry_no_cache_file(self):
         # Index has entry but no corresponding .json file on disk
-        index = {"ghost_key": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
+        index = {"00000000000000000000000000000006": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
         p1, p2, p3 = self._patch(index, [1.0, 0.0])
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
@@ -4220,8 +4232,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_engine_isolation_brave_vs_perplexity(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "brave"})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave"})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "perplexity", None, 60, 0.0)
@@ -4229,8 +4241,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_engine_isolation_perplexity_found(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "perplexity", "answer": "42"})
-        index = {"k1": {"engine": "perplexity", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "perplexity", "answer": "42"})
+        index = {"00000000000000000000000000000005": {"engine": "perplexity", "offset": None, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "perplexity", None, 60, 0.5)
@@ -4238,8 +4250,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_offset_isolation_different_offset_not_matched(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "brave"})
-        index = {"k1": {"engine": "brave", "offset": 0, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave"})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": 0, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", 1, 60, 0.0)
@@ -4248,8 +4260,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
     def test_offset_none_vs_zero_not_matched(self):
         # offset=None (not provided) != offset=0 (explicitly passed)
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "brave"})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave"})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", 0, 60, 0.0)
@@ -4260,11 +4272,11 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
         emb_q     = [1.0, 0.0]
         emb_low   = [0.0, 1.0]  # orthogonal → sim ≈ 0
         emb_high  = [1.0, 0.0]  # identical  → sim = 1
-        self._write_cache_file("k_low",  {"engine": "brave", "results": ["low"]})
-        self._write_cache_file("k_high", {"engine": "brave", "results": ["high"]})
+        self._write_cache_file("00000000000000000000000000000007",  {"engine": "brave", "results": ["low"]})
+        self._write_cache_file("00000000000000000000000000000008", {"engine": "brave", "results": ["high"]})
         index = {
-            "k_low":  {"engine": "brave", "offset": None, "embedding": emb_low},
-            "k_high": {"engine": "brave", "offset": None, "embedding": emb_high},
+            "00000000000000000000000000000007":  {"engine": "brave", "offset": None, "embedding": emb_low},
+            "00000000000000000000000000000008": {"engine": "brave", "offset": None, "embedding": emb_high},
         }
         p1, p2, p3 = self._patch(index, emb_q)
         with p1, p2, p3:
@@ -4275,8 +4287,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_threshold_exactly_at_boundary_matches(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "brave", "results": []})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave", "results": []})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             # Identical vectors → sim=1.0, threshold=1.0 → should match (>=)
@@ -4285,8 +4297,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_threshold_above_max_possible_never_matches(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("k1", {"engine": "brave", "results": []})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave", "results": []})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb}}
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
             # threshold=1.0001 > max possible cosine sim of 1.0 → never matches
@@ -4296,8 +4308,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
     def test_threshold_zero_matches_any_entry(self):
         emb_q   = [1.0, 0.0]
         emb_ent = [0.0, 1.0]  # orthogonal → sim = 0.0, which is >= 0.0
-        self._write_cache_file("k1", {"engine": "brave", "results": ["found"]})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb_ent}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave", "results": ["found"]})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb_ent}}
         p1, p2, p3 = self._patch(index, emb_q)
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.0)
@@ -4306,10 +4318,10 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_corrupted_cache_file_returns_none(self):
         # Index entry exists and file exists, but content is invalid JSON
-        p = os.path.join(self.tmpdir, "k1.json")
+        p = os.path.join(self.tmpdir, "00000000000000000000000000000005.json")
         with open(p, 'w') as f:
             f.write("{{not json{{")
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": [1.0, 0.0]}}
         p1, p2, p3 = self._patch(index, [1.0, 0.0])
         with p1, p2, p3:
             result, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.5)
@@ -4317,11 +4329,11 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
 
     def test_multiple_engines_in_index_only_matching_returned(self):
         emb = [1.0, 0.0]
-        self._write_cache_file("kb", {"engine": "brave",     "results": ["brave"]})
-        self._write_cache_file("kp", {"engine": "perplexity","answer":  "perp"})
+        self._write_cache_file("00000000000000000000000000000009", {"engine": "brave",     "results": ["brave"]})
+        self._write_cache_file("00000000000000000000000000000010", {"engine": "perplexity","answer":  "perp"})
         index = {
-            "kb": {"engine": "brave",      "offset": None, "embedding": emb},
-            "kp": {"engine": "perplexity", "offset": None, "embedding": emb},
+            "00000000000000000000000000000009": {"engine": "brave",      "offset": None, "embedding": emb},
+            "00000000000000000000000000000010": {"engine": "perplexity", "offset": None, "embedding": emb},
         }
         p1, p2, p3 = self._patch(index, emb)
         with p1, p2, p3:
@@ -4341,8 +4353,8 @@ class TestReadFromSemanticCacheEdgeCases(unittest.TestCase):
         angle = math.acos(0.9123456789)
         emb_ent = [1.0, 0.0]
         emb_q   = [math.cos(angle), math.sin(angle)]
-        self._write_cache_file("k1", {"engine": "brave", "results": []})
-        index = {"k1": {"engine": "brave", "offset": None, "embedding": emb_ent}}
+        self._write_cache_file("00000000000000000000000000000005", {"engine": "brave", "results": []})
+        index = {"00000000000000000000000000000005": {"engine": "brave", "offset": None, "embedding": emb_ent}}
         p1, p2, p3 = self._patch(index, emb_q)
         with p1, p2, p3:
             _, sim = ccsearch.read_from_semantic_cache("q", "brave", None, 60, 0.9)
@@ -4757,23 +4769,20 @@ class TestMcpServerTools(unittest.TestCase):
         self.assertEqual(mock_execute.call_args.kwargs["result_limit"], 2)
 
     def test_search_validation_error(self):
-        result = self.mcp_server.search("", engine="brave")
-        self.assertIn("error", result)
+        with self.assertRaises(ValueError):
+            self.mcp_server.search("", engine="brave")
 
     def test_search_invalid_offset_error(self):
-        result = self.mcp_server.search("test", engine="perplexity", offset=1)
-        self.assertIn("error", result)
-        self.assertIn("offset", result["error"])
+        with self.assertRaisesRegex(ValueError, "offset"):
+            self.mcp_server.search("test", engine="perplexity", offset=1)
 
     def test_search_rejects_host_filters_for_unsupported_engine(self):
-        result = self.mcp_server.search("test", engine="perplexity", include_hosts="example.com")
-        self.assertIn("error", result)
-        self.assertIn("Host filters", result["error"])
+        with self.assertRaisesRegex(ValueError, "Host filters"):
+            self.mcp_server.search("test", engine="perplexity", include_hosts="example.com")
 
     def test_search_rejects_result_limit_for_unsupported_engine(self):
-        result = self.mcp_server.search("test", engine="perplexity", result_limit=2)
-        self.assertIn("error", result)
-        self.assertIn("Result limiting", result["error"])
+        with self.assertRaisesRegex(ValueError, "Result limiting"):
+            self.mcp_server.search("test", engine="perplexity", result_limit=2)
 
     @patch('mcp_server.execute_query')
     @patch('mcp_server.load_config')
@@ -4817,8 +4826,8 @@ class TestMcpServerTools(unittest.TestCase):
         self.assertEqual(mock_batch.call_args.kwargs["max_workers"], 5)
 
     def test_batch_tool_validation_error(self):
-        result = self.mcp_server.batch([])
-        self.assertIn("error", result)
+        with self.assertRaises(ValueError):
+            self.mcp_server.batch([])
 
     def test_fetch_validation_error(self):
         with self.assertRaisesRegex(ValueError, "valid HTTP or HTTPS URL"):

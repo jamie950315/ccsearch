@@ -238,3 +238,13 @@ Also run checks proportional to the changed surface:
 - HTTP non-health endpoints use `X-API-Key`; MCP uses the key as a path prefix.
 - The HTTP API maps validation failures to 400, authentication failures to 401, completed fetch error payloads to 424 while preserving their metadata through Cloudflare, and unexpected server failures to 500.
 - Keep `README.md` in English unless the user explicitly requests another language.
+
+## Review hardening (2026-09-08)
+
+- Strict option types and parsed HTTP(S) URLs are validated before cache/network work; bad batch items remain isolated. CLI failures, including partial/batch failures, exit nonzero.
+- Never cache failed/partial results; legacy failed entries are bypassed. Fetch keys preserve path semantics and repeated-value order. Semantic index mutations use a cross-process lock; model initialization is synchronized and computation failures surface.
+- Brave keys wait outside the shared limiter lock. MCP blocking tools run in the bounded Starlette thread pool. Uvicorn access logging is disabled; upstream proxy/client logs can still expose authenticated URLs.
+- Empty authentication files fail closed; concurrent first starts atomically publish one complete 0600 key. Existing unreadable configuration fails explicitly.
+- Missing provider answers/error envelopes fail rather than becoming successful empty responses. `both` keeps partial output but sets top-level `error` if both engines fail.
+- Fetch fallback is limited to expected transport/browser errors, not programming exceptions. Unresolved challenges and empty document conversions fail. MarkItDown uses its single file conversion API; MIME types take precedence over dynamic URL suffixes.
+- Review regression suites are `test_review_*.py`; use `python3 -m unittest discover -v` to include them along with the original suite. Tests must not inherit real provider keys into mocked assertions.

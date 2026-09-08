@@ -10,7 +10,6 @@ import json
 import html as html_lib
 import time
 import re
-import io
 import argparse
 import configparser
 import importlib.util
@@ -19,6 +18,7 @@ import hashlib
 import tempfile
 import concurrent.futures
 import threading
+import math
 from contextlib import contextmanager
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -31,6 +31,15 @@ try:
     HAS_CURL_CFFI=True
 except ImportError:
     HAS_CURL_CFFI=False
+
+FETCH_REQUEST_ERRORS=(requests.exceptions.RequestException,)
+if HAS_CURL_CFFI:
+    FETCH_REQUEST_ERRORS+=(cffi_requests.exceptions.RequestException,)
+
+class FlareSolverrError(RuntimeError):
+    """An explicit failure or malformed reply from the browser service."""
+
+FETCH_BROWSER_ERRORS=FETCH_REQUEST_ERRORS+(FlareSolverrError,)
 
 def load_config(config_file):
     config = configparser.ConfigParser()
@@ -67,7 +76,10 @@ def load_config(config_file):
     }
 
     if os.path.exists(config_file):
-        config.read(config_file)
+        # ConfigParser.read silently skips unreadable files, hiding a broken
+        # deployment behind defaults. An existing configuration must be readable.
+        with open(config_file, encoding="utf-8") as config_stream:
+            config.read_file(config_stream)
     return config
 
 def load_api_key(api_key_file, env_var="CCSEARCH_API_KEY", create_if_missing=False):
@@ -78,16 +90,28 @@ def load_api_key(api_key_file, env_var="CCSEARCH_API_KEY", create_if_missing=Fal
 
     if os.path.exists(api_key_file):
         with open(api_key_file, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            api_key = f.read().strip()
+        if not api_key:
+            raise RuntimeError("API key file is empty; refusing to start without authentication.")
+        return api_key
 
     if not create_if_missing:
         return ""
 
     import secrets
     api_key = secrets.token_urlsafe(32)
-    with open(api_key_file, "w", encoding="utf-8") as f:
-        f.write(api_key)
-    os.chmod(api_key_file, 0o600)
+    key_directory = os.path.dirname(os.path.abspath(api_key_file))
+    fd, temporary_path = tempfile.mkstemp(prefix=".ccsearch-key-", dir=key_directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(api_key)
+        try:
+            # Publish a complete 0600 file without replacing another server's key.
+            os.link(temporary_path, api_key_file)
+        except FileExistsError:
+            return load_api_key(api_key_file, env_var=env_var, create_if_missing=False)
+    finally:
+        os.unlink(temporary_path)
     return api_key
 
 def mask_secret(secret, prefix=4, suffix=4):
@@ -205,15 +229,18 @@ def normalize_fetch_cache_url(url):
 
     scheme=parsed.scheme.lower()
     hostname=(parsed.hostname or "").lower()
+    if ":" in hostname:
+        hostname=f"[{hostname}]"
     port=parsed.port
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         netloc=f"{hostname}:{port}"
     else:
         netloc=hostname
 
+    # Path separators and params can identify distinct server resources.
     path=parsed.path or "/"
-    if path != "/":
-        path=re.sub(r"/{2,}", "/", path).rstrip("/") or "/"
+    if parsed.username is not None:
+        netloc=parsed.netloc.rsplit("@", 1)[0] + "@" + netloc
 
     filtered_params=[]
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
@@ -221,10 +248,11 @@ def normalize_fetch_cache_url(url):
         if lower_key.startswith(TRACKING_QUERY_PREFIXES) or lower_key in TRACKING_QUERY_KEYS:
             continue
         filtered_params.append((key, value))
-    filtered_params.sort()
+    # Sort parameter names, but preserve repeated-value order (e.g. sort=a&sort=b).
+    filtered_params.sort(key=lambda item: item[0])
     query=urlencode(filtered_params, doseq=True)
 
-    return urlunparse((scheme, netloc, path, "", query, ""))
+    return urlunparse((scheme, netloc, path, parsed.params, query, ""))
 
 def normalize_cache_query(query, engine):
     """Normalize cache input on a per-engine basis."""
@@ -280,7 +308,9 @@ def _delete_cache_file_if_retained_too_long(cache_file, now=None):
 
 def _prune_semantic_index_orphans():
     """Remove semantic entries whose corresponding result file no longer exists."""
-    with _semantic_index_lock:
+    if not os.path.exists(_semantic_index_path()):
+        return 0
+    with _semantic_index_lock, _locked_runtime_file(_semantic_index_path() + ".lock"):
         index=_load_semantic_index()
         if not index:
             return 0
@@ -349,13 +379,26 @@ def read_from_cache(query, engine, offset, ttl_minutes):
     try:
         with open(cache_file, 'r', encoding='utf-8') as f:
             result=json.load(f)
+            if not is_cacheable_result(result):
+                return None
             if engine == "fetch" and isinstance(result, dict):
                 result["url"]=query
             return result
-    except Exception:
-        return None # Return None if cache file is corrupted
+    except FileNotFoundError:
+        return None  # Another process may prune an expired file.
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"Warning: Failed to read cache: {exc}\n")
+        return None
+
+def is_cacheable_result(result):
+    """Never persist or reuse failed or partially failed upstream responses."""
+    return isinstance(result, dict) and not any(
+        result.get(field) for field in ("error", "brave_error", "perplexity_error")
+    )
 
 def write_to_cache(query, engine, offset, result):
+    if not is_cacheable_result(result):
+        return
     prune_cache()
     cache_file = os.path.join(get_cache_dir(), get_cache_key(query, engine, offset))
     try:
@@ -370,7 +413,7 @@ def write_to_cache(query, engine, offset, result):
                 finally:
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
-    except Exception as e:
+    except OSError as e:
         sys.stderr.write(f"Warning: Failed to write to cache: {e}\n")
 
 def backfill_semantic_index(query, engine, offset):
@@ -387,18 +430,23 @@ def backfill_semantic_index(query, engine, offset):
 # Semantic cache (optional — requires fastembed)
 # ---------------------------------------------------------------------------
 _embedding_model = None
+_embedding_model_lock = threading.Lock()
 
 def _get_embedding_model():
     """Lazily load the fastembed TextEmbedding model. Returns None if unavailable."""
     global _embedding_model
-    if _embedding_model is None:
-        try:
-            from fastembed import TextEmbedding
-            sys.stderr.write("[ccsearch] Loading embedding model (BAAI/bge-small-en-v1.5)...\n")
-            _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        except ImportError:
-            sys.stderr.write("Warning: fastembed not installed — semantic cache disabled. Run: pip install fastembed\n")
-            _embedding_model = False  # sentinel: don't retry import
+    with _embedding_model_lock:
+        if _embedding_model is None:
+            try:
+                from fastembed import TextEmbedding
+            except ModuleNotFoundError as exc:
+                if exc.name != "fastembed":
+                    raise
+                sys.stderr.write("Warning: fastembed not installed — semantic cache disabled. Run: pip install fastembed\n")
+                _embedding_model = False  # sentinel: don't retry import
+            else:
+                sys.stderr.write("[ccsearch] Loading embedding model (BAAI/bge-small-en-v1.5)...\n")
+                _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _embedding_model if _embedding_model is not False else None
 
 def _compute_embedding(text):
@@ -406,14 +454,12 @@ def _compute_embedding(text):
     model = _get_embedding_model()
     if model is None:
         return None
-    try:
-        return next(model.embed([text])).tolist()
-    except Exception as e:
-        sys.stderr.write(f"Warning: embedding failed: {e}\n")
-        return None
+    return next(model.embed([text])).tolist()
 
 def _cosine_sim(a, b):
     """Pure-Python cosine similarity between two equal-length float lists."""
+    if len(a) != len(b):
+        raise ValueError("Semantic embedding dimensions do not match")
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
@@ -428,8 +474,14 @@ def _load_semantic_index():
         return {}
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            index=json.load(f)
+        if not isinstance(index, dict):
+            raise ValueError("semantic index must be an object")
+        return index
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"Warning: Failed to read semantic index: {exc}\n")
         return {}
 
 def _save_semantic_index(index):
@@ -445,7 +497,7 @@ def _save_semantic_index(index):
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
-    except Exception as e:
+    except OSError as e:
         sys.stderr.write(f"Warning: could not save semantic index: {e}\n")
 
 def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
@@ -455,14 +507,14 @@ def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
     if not index:
         return None, 0.0
 
-    q_emb = _compute_embedding(query)
-    if q_emb is None:
-        return None, 0.0
+    q_emb = None
 
     best_key, best_sim = None, -1.0
     cache_dir = get_cache_dir()
     deleted_stale_entry=False
     for key, meta in index.items():
+        if not _cache_result_filename(key + ".json") or not isinstance(meta, dict):
+            raise ValueError("Invalid semantic index entry")
         if meta.get("engine") != engine or meta.get("offset") != offset:
             continue
         cache_file = os.path.join(cache_dir, key + ".json")
@@ -483,6 +535,11 @@ def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
         emb = meta.get("embedding")
         if not emb:
             continue
+        # Avoid loading the embedding runtime when no fresh candidate applies.
+        if q_emb is None:
+            q_emb = _compute_embedding(query)
+            if q_emb is None:
+                return None, 0.0
         sim = _cosine_sim(q_emb, emb)
         if sim > best_sim:
             best_sim, best_key = sim, key
@@ -495,9 +552,12 @@ def read_from_semantic_cache(query, engine, offset, ttl_minutes, threshold):
         try:
             with open(cache_file, encoding="utf-8") as f:
                 result = json.load(f)
-            return result, round(best_sim, 4)
-        except Exception:
+            if is_cacheable_result(result):
+                return result, round(best_sim, 4)
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"Warning: Failed to read semantic cache result: {exc}\n")
 
     return None, 0.0
 
@@ -507,7 +567,7 @@ def update_semantic_index(query, engine, offset, cache_key_filename):
     if emb is None:
         return
     key = cache_key_filename.replace(".json", "")
-    with _semantic_index_lock:
+    with _semantic_index_lock, _locked_runtime_file(_semantic_index_path() + ".lock"):
         index = _load_semantic_index()
         index[key] = {"query": query, "engine": engine, "offset": offset, "embedding": emb}
         _save_semantic_index(index)
@@ -541,12 +601,9 @@ def _brave_rate_limit_windows(payload):
 
 def _brave_requests_per_second(config):
     """Return the configured per-key Brave rate capped at the Search plan's 50 RPS."""
-    try:
-        requested=config.getfloat('Brave', 'requests_per_second', fallback=1.0)
-    except (ValueError, configparser.Error):
-        requested=1.0
-    if requested <= 0:
-        requested=1.0
+    requested=config.getfloat('Brave', 'requests_per_second', fallback=1.0)
+    if not math.isfinite(requested) or requested <= 0:
+        raise ValueError("Brave requests_per_second must be a finite positive number")
     return max(1, min(BRAVE_SEARCH_MAX_RPS, int(requested)))
 
 def _wait_for_brave_rate_limit(config, key_fingerprint="default", now_fn=time.time, sleep_fn=time.sleep):
@@ -554,15 +611,17 @@ def _wait_for_brave_rate_limit(config, key_fingerprint="default", now_fn=time.ti
     capacity=_brave_requests_per_second(config)
     fingerprint=str(key_fingerprint or "default")
     state_path=_brave_rate_limit_path()
-    with _brave_rate_limit_thread_lock:
-        with _locked_runtime_file(state_path) as state_file:
-            while True:
+    while True:
+        with _brave_rate_limit_thread_lock:
+            with _locked_runtime_file(state_path) as state_file:
                 now=now_fn()
                 state_file.seek(0)
                 try:
                     payload=json.load(state_file)
                     windows=_brave_rate_limit_windows(payload)
-                except (json.JSONDecodeError, OSError, ValueError):
+                except json.JSONDecodeError as exc:
+                    if state_file.tell():
+                        sys.stderr.write(f"Warning: Resetting malformed Brave rate-limit state: {exc}\n")
                     windows={}
                 timestamps=[
                     float(ts) for ts in windows.get(fingerprint, [])
@@ -577,7 +636,8 @@ def _wait_for_brave_rate_limit(config, key_fingerprint="default", now_fn=time.ti
                     state_file.flush()
                     return
                 sleep_for=max(0.001, timestamps[0] + 1.0 - now)
-                sleep_fn(sleep_for)
+        # Never hold the shared lock while waiting: other keys have free slots.
+        sleep_fn(sleep_for)
 
 def _next_brave_key_index(key_count):
     """Return the next round-robin index shared by local CLI/API/MCP processes."""
@@ -590,7 +650,9 @@ def _next_brave_key_index(key_count):
             try:
                 payload=json.load(state_file)
                 counter=int(payload.get("counter", 0)) if isinstance(payload, dict) else 0
-            except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                if state_file.tell():
+                    sys.stderr.write(f"Warning: Resetting malformed Brave key-rotation state: {exc}\n")
                 counter=0
             if counter < 0:
                 counter=0
@@ -603,6 +665,8 @@ def _next_brave_key_index(key_count):
 
 def retry_request(method, url, max_retries, before_attempt=None, **kwargs):
     """Request wrapper with a simple Exponential Backoff mechanism"""
+    if type(max_retries) is not int or max_retries < 0:
+        raise ValueError("max_retries must be a non-negative integer.")
     for attempt in range(max_retries + 1):
         try:
             if before_attempt is not None:
@@ -614,6 +678,9 @@ def retry_request(method, url, max_retries, before_attempt=None, **kwargs):
             response.raise_for_status()
             return response
         except (requests.exceptions.RequestException) as e:
+            if isinstance(e, (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema,
+                              requests.exceptions.MissingSchema, requests.exceptions.InvalidHeader)):
+                raise
             # Avoid retrying standard HTTP 4xx client errors (unless it's 429 Too Many Requests)
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
@@ -697,7 +764,9 @@ def _normalize_host_filters(hosts):
     elif isinstance(hosts, (list, tuple, set)):
         raw_values=[]
         for value in hosts:
-            raw_values.extend(re.split(r"[\s,]+", str(value)))
+            if not isinstance(value, str):
+                raise ValueError("Host filters must be provided as a string or list of strings.")
+            raw_values.extend(re.split(r"[\s,]+", value))
     else:
         raise ValueError("Host filters must be provided as a string or list of strings.")
 
@@ -837,8 +906,9 @@ def perform_brave_search(query, api_key, config, offset=None):
     params = {"q": query, "count": count}
 
     safesearch = config.get('Brave', 'safesearch', fallback='moderate').lower()
-    if safesearch in ['off', 'moderate', 'strict']:
-        params['safesearch'] = safesearch
+    if safesearch not in ['off', 'moderate', 'strict']:
+        raise ValueError("Brave safesearch must be off, moderate, or strict.")
+    params['safesearch'] = safesearch
 
     freshness = config.get('Brave', 'freshness', fallback='').lower()
     if freshness in ['pd', 'pw', 'pm', 'py']:
@@ -854,10 +924,16 @@ def perform_brave_search(query, api_key, config, offset=None):
         headers=headers, params=params, timeout=(10, 30),
     )
     data = response.json()
-
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError("Brave returned an invalid or error response.")
+    web = data.get('web', {})
+    if not isinstance(web, dict) or not isinstance(web.get('results', []), list):
+        raise RuntimeError("Brave returned invalid web results.")
     results = []
-    if 'web' in data and 'results' in data['web']:
-        for item in data['web']['results']:
+    if 'results' in web:
+        for item in web['results']:
+            if not isinstance(item, dict):
+                raise RuntimeError("Brave returned an invalid result item.")
             result_url=item.get("url")
             results.append({
                 "title": _clean_api_text(item.get("title")),
@@ -905,10 +981,11 @@ def perform_perplexity_search(query, api_key, config):
     response = retry_request('POST', url, max_retries, headers=headers, json=payload, timeout=(10, 60))
     data = response.json()
 
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        content = "No response content found."
+    choices = data.get("choices") if isinstance(data, dict) else None
+    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Perplexity returned no valid answer content.")
     content = html_lib.unescape(content)
     citations = _extract_perplexity_citations(data)
 
@@ -1025,6 +1102,8 @@ def perform_both_search(query, brave_api_key, perplexity_api_key, config, offset
         result["perplexity_citation_hosts"]=citation_hosts
         result["perplexity_citation_host_count"]=len(citation_hosts)
     result["has_partial_failure"] = bool(result.get("brave_error") or result.get("perplexity_error"))
+    if result.get("brave_error") and result.get("perplexity_error"):
+        result["error"] = "Both search engines failed."
     return result
 
 def perform_llm_context_search(query, api_key, config):
@@ -1046,8 +1125,9 @@ def perform_llm_context_search(query, api_key, config):
         "maximum_number_of_urls": max_urls,
     }
 
-    if threshold_mode in ['strict', 'balanced', 'lenient', 'disabled']:
-        params['context_threshold_mode'] = threshold_mode
+    if threshold_mode not in ['strict', 'balanced', 'lenient', 'disabled']:
+        raise ValueError("LLMContext context_threshold_mode must be strict, balanced, lenient, or disabled.")
+    params['context_threshold_mode'] = threshold_mode
 
     freshness = config.get('LLMContext', 'freshness', fallback='').lower()
     if freshness in ['pd', 'pw', 'pm', 'py']:
@@ -1061,11 +1141,17 @@ def perform_llm_context_search(query, api_key, config):
     )
     data = response.json()
 
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError("Brave LLM Context returned an invalid or error response.")
     grounding = data.get("grounding", {})
     sources = data.get("sources", {})
+    if not isinstance(grounding, dict) or not isinstance(grounding.get("generic", []), list) or not isinstance(sources, dict):
+        raise RuntimeError("Brave LLM Context returned invalid grounding or sources.")
 
     results = []
     for item in grounding.get("generic", []):
+        if not isinstance(item, dict) or not isinstance(item.get("snippets", []), list):
+            raise RuntimeError("Brave LLM Context returned an invalid result item.")
         result_url=item.get("url")
         source_meta=sources.get(result_url, {}) if result_url else {}
         if not isinstance(source_meta, dict):
@@ -1901,6 +1987,8 @@ def _filename_from_content_disposition(content_disposition):
 
 def _guess_extension(url, content_type=None):
     """Guess a useful file extension from the URL path or content type."""
+    if content_type in MARKITDOWN_MIME_TO_EXTENSIONS:
+        return MARKITDOWN_MIME_TO_EXTENSIONS[content_type]
     path=urlparse(url).path
     ext=os.path.splitext(path)[1].lower()
     if ext:
@@ -2004,40 +2092,21 @@ def _convert_with_markitdown(content_bytes, url, content_type=None):
         return None, "Binary document detected but markitdown is not installed."
 
     extension=_guess_extension(url, content_type) or ".bin"
-    file_name=_title_from_url(url, fallback="document") or "document"
-    if not file_name.endswith(extension):
-        file_name=f"{file_name}{extension}"
-
     md=MarkItDown(enable_plugins=False)
-
-    if hasattr(md, "convert_stream"):
-        stream=io.BytesIO(content_bytes)
-        stream.name=file_name
-        try:
-            result=md.convert_stream(stream)
-            text=getattr(result, "text_content", None) or str(result)
-            return text.strip(), None
-        except TypeError:
-            # Fall back to the file-path API for older/newer signatures we don't know.
-            pass
-        except Exception as exc:
-            return None, f"Binary document conversion failed: {exc}"
-
-    with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as tmp:
-        tmp.write(content_bytes)
-        tmp_path=tmp.name
-    try:
+    # The file API supplies a reliable extension and avoids retrying converter
+    # implementation errors through a second API with different semantics.
+    with tempfile.TemporaryDirectory(prefix="ccsearch-document-") as directory:
+        tmp_path=os.path.join(directory, "document" + extension)
+        with open(tmp_path, "wb") as tmp:
+            tmp.write(content_bytes)
         try:
             result=md.convert(tmp_path)
-            text=getattr(result, "text_content", None) or str(result)
-            return text.strip(), None
         except Exception as exc:
             return None, f"Binary document conversion failed: {exc}"
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        text=result.text_content
+        if not isinstance(text, str) or not text.strip():
+            return None, "Binary document conversion returned no extractable content."
+        return text.strip(), None
 
 def _convert_binary_response(url, response):
     """Convert supported binary documents to Markdown, when appropriate."""
@@ -2070,7 +2139,7 @@ def _detect_cloudflare(response):
     for indicator in CLOUDFLARE_INDICATORS:
         if indicator in responseText:
             return True
-    if len(response.content)<1024 and response.headers.get('cf-ray'):
+    if response.headers.get('cf-mitigated', '').lower() == 'challenge':
         return True
     return False
 
@@ -2078,12 +2147,12 @@ def _simple_fetch(url, maxRetries=2):
     """Fetch a webpage. Uses curl_cffi for TLS impersonation when available, otherwise requests.Session."""
     if HAS_CURL_CFFI:
         for attempt in range(maxRetries+1):
+            session=cffi_requests.Session(impersonate="chrome")
             try:
-                session=cffi_requests.Session(impersonate="chrome")
                 response=session.get(url, headers=FETCH_HEADERS, timeout=30)
                 response.raise_for_status()
                 return response
-            except Exception as e:
+            except FETCH_REQUEST_ERRORS as e:
                 status=getattr(getattr(e, 'response', None), 'status_code', None)
                 if status and 400<=status<500 and status!=429:
                     raise
@@ -2091,6 +2160,8 @@ def _simple_fetch(url, maxRetries=2):
                     time.sleep(2**attempt)
                     continue
                 raise
+            finally:
+                session.close()
     return retry_request('GET', url, maxRetries, headers=FETCH_HEADERS, timeout=(10, 30))
 
 def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
@@ -2098,12 +2169,15 @@ def _flaresolverr_fetch(url, flaresolverrUrl, timeout=60000):
     payload={"cmd": "request.get", "url": url, "maxTimeout": timeout}
     httpTimeout=(10, timeout/1000+10)
     response=requests.post(flaresolverrUrl, json=payload, timeout=httpTimeout)
+    response.raise_for_status()
     data=response.json()
+    if not isinstance(data, dict):
+        raise FlareSolverrError("FlareSolverr error: expected a JSON object")
     if data.get("status")!="ok":
-        raise Exception(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
+        raise FlareSolverrError(f"FlareSolverr error: {data.get('message', 'Unknown error')}")
     solution=data.get("solution") or {}
-    if "response" not in solution:
-        raise Exception("FlareSolverr error: response body is missing")
+    if not isinstance(solution, dict) or "response" not in solution:
+        raise FlareSolverrError("FlareSolverr error: response body is missing")
     result=requests.Response()
     result.status_code=int(solution.get("status") or 200)
     result.url=solution.get("url") or url
@@ -2146,6 +2220,9 @@ def _build_flaresolverr_fetch_result(url, value):
     http_error=_http_fetch_error(response)
     if http_error:
         return _build_fetch_result(url, "flaresolverr", response=response, error=http_error)
+    if _detect_cloudflare(response):
+        return _build_fetch_result(url, "flaresolverr", response=response,
+                                   error="Cloudflare challenge remains after browser rendering.")
     final_url=_normalize_final_url(response, url)
     title, clean_text, chunks=_extract_html_content(response.content, base_url=final_url)
     metadata=_extract_html_metadata(response.content, base_url=final_url)
@@ -2291,6 +2368,12 @@ def perform_fetch(url, config):
     flaresolverrUrl=config.get('Fetch', 'flaresolverr_url', fallback='').strip()
     flaresolverrTimeout=config.getint('Fetch', 'flaresolverr_timeout', fallback=60000)
     flaresolverrMode=config.get('Fetch', 'flaresolverr_mode', fallback='fallback').strip().lower()
+    if flaresolverrMode not in {"never", "fallback", "always"}:
+        raise ValueError("Fetch.flaresolverr_mode must be never, fallback, or always.")
+    if flaresolverrMode == "always" and not flaresolverrUrl:
+        raise ValueError("Fetch.flaresolverr_url is required in always mode.")
+    if flaresolverrTimeout <= 0:
+        raise ValueError("Fetch.flaresolverr_timeout must be positive.")
     maxRetries=config.getint('Brave', 'max_retries', fallback=2)
     useAlways=flaresolverrMode=="always" and flaresolverrUrl
     canFallback=flaresolverrMode=="fallback" and flaresolverrUrl
@@ -2302,7 +2385,7 @@ def perform_fetch(url, config):
             flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
             sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
             return _build_flaresolverr_fetch_result(url, flare_response)
-        except Exception as e:
+        except FETCH_BROWSER_ERRORS as e:
             return _build_fetch_result(url, "flaresolverr", error=f"FlareSolverr failed: {e}")
 
     # Try simple fetch first
@@ -2310,7 +2393,7 @@ def perform_fetch(url, config):
     response=None
     try:
         response=_simple_fetch(url, maxRetries)
-    except Exception as e:
+    except FETCH_REQUEST_ERRORS as e:
         simpleFetchErr=e
         response=getattr(e, "response", None)
 
@@ -2319,28 +2402,30 @@ def perform_fetch(url, config):
         direct_http_error=_http_fetch_error(response)
         direct_status=getattr(response, "status_code", None)
         requested_extension=_guess_extension(url)
-        binary_request=requested_extension in MARKITDOWN_EXTENSIONS
+        contentType=_normalize_content_type(response)
+        binary_request=(requested_extension in MARKITDOWN_EXTENSIONS
+                        or contentType in MARKITDOWN_MIME_TO_EXTENSIONS)
         cloudflare_status=direct_status in {200, 403, 429, 503}
         cloudflare_blocked=(
-            canFallback
-            and not binary_request
+            not binary_request
             and cloudflare_status
             and _detect_cloudflare(response)
         )
         if cloudflare_blocked:
+            if not canFallback:
+                return _build_fetch_result(url, "direct", response=response, error="Cloudflare challenge detected; browser fallback is not configured or disabled.")
             sys.stderr.write("[ccsearch] Cloudflare detected, falling back to FlareSolverr...\n")
             try:
                 flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
                 sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
                 return _build_flaresolverr_fetch_result(url, flare_response)
-            except Exception as flareErr:
+            except FETCH_BROWSER_ERRORS as flareErr:
                 return _build_fetch_result(url, "direct", response=response, error=f"Cloudflare detected. Direct fetch blocked | FlareSolverr also failed: {flareErr}")
         if direct_http_error:
             return _build_fetch_result(url, "direct", response=response, error=direct_http_error)
         converted_result=_convert_binary_response(url, response)
         if converted_result:
             return converted_result
-        contentType=_normalize_content_type(response)
         looksLikeHtml=_is_html_content_type(contentType) or _looks_like_html_payload(response.content)
         metadata={}
         chunks=None
@@ -2355,6 +2440,7 @@ def perform_fetch(url, config):
         isHtml=looksLikeHtml or contentType is None
         isSpa=False
         spaReason=""
+        rendering_error=None
         if isHtml and response.status_code==200:
             isSpa, spaReason=_detect_spa_shell(response.content, len(cleanText))
         if canFallback and isSpa:
@@ -2366,12 +2452,16 @@ def perform_fetch(url, config):
                 rendered_content=rendered.get("content", "")
                 if not rendered.get("error") and len(rendered_content)>len(cleanText):
                     return rendered
+                rendering_error=rendered.get("error")
                 sys.stderr.write("[ccsearch] FlareSolverr result not better, using direct response.\n")
-            except Exception as flareErr:
+            except FETCH_BROWSER_ERRORS as flareErr:
+                rendering_error=str(flareErr)
                 sys.stderr.write(f"[ccsearch] FlareSolverr fallback failed: {flareErr}\n")
         content_error=None
         if isSpa:
             content_error=f"SPA shell detected ({spaReason}); browser rendering did not produce additional extractable content."
+            if rendering_error:
+                content_error+=f" FlareSolverr failed: {rendering_error}"
         elif not cleanText.strip():
             content_error="No extractable content found in the response."
         return _build_fetch_result(url, "direct", response=response, title=title, content=cleanText, error=content_error, metadata=metadata, chunks=chunks)
@@ -2383,7 +2473,7 @@ def perform_fetch(url, config):
             flare_response=_flaresolverr_fetch(url, flaresolverrUrl, flaresolverrTimeout)
             sys.stderr.write("[ccsearch] FlareSolverr solved challenge successfully.\n")
             return _build_flaresolverr_fetch_result(url, flare_response)
-        except Exception as flareErr:
+        except FETCH_BROWSER_ERRORS as flareErr:
             return _build_fetch_result(url, "direct", error=f"Direct fetch failed: {simpleFetchErr} | FlareSolverr also failed: {flareErr}")
 
     return _build_fetch_result(url, "direct", error=str(simpleFetchErr))
@@ -2495,10 +2585,6 @@ def _engine_configured_via(engine):
             return f"{brave_env_name} + OPENROUTER_API_KEY" if os.environ.get("OPENROUTER_API_KEY") else None
         return brave_env_name
     required=_engine_required_env_vars(engine)
-    if engine == "both":
-        if all(os.environ.get(name) for name in required):
-            return " + ".join(required)
-        return None
     for name in required:
         if os.environ.get(name):
             return name
@@ -2561,14 +2647,30 @@ def get_diagnostics(config=None, include_engines=True):
 
 def validate_query(query, engine):
     """Validate the query shape for a given engine. Returns an error message or None."""
-    if not query or not str(query).strip():
+    if not isinstance(query, str) or not query.strip():
         return "'query' is required"
-    if engine == "fetch" and not str(query).startswith("http"):
-        return "For fetch engine, query must be a valid HTTP or HTTPS URL."
+    if engine == "fetch":
+        try:
+            parsed = urlparse(query)
+            valid = (parsed.scheme in {"http", "https"} and parsed.hostname
+                     and not any(char.isspace() or ord(char) < 32 for char in query)
+                     and parsed.port != 0)
+        except ValueError:
+            valid = False
+        if not valid:
+            return "For fetch engine, query must be a valid HTTP or HTTPS URL."
     return None
 
-def validate_execution_options(engine, offset=None, cache_ttl=DEFAULT_CACHE_TTL_MINUTES, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
+def validate_execution_options(engine, offset=None, cache_ttl=DEFAULT_CACHE_TTL_MINUTES, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None, cache=False, semantic_cache=False):
     """Validate shared execution options. Returns an error message or None."""
+    for name, value in (("cache", cache), ("semantic_cache", semantic_cache), ("flaresolverr", flaresolverr)):
+        if type(value) is not bool:
+            return f"'{name}' must be a boolean."
+    for name, value in (("offset", offset), ("result_limit", result_limit), ("cache_ttl", cache_ttl)):
+        if (value is not None or name == "cache_ttl") and type(value) is not int:
+            return f"'{name}' must be an integer."
+    if type(semantic_threshold) not in (int, float) or not 0.0 <= semantic_threshold <= 1.0:
+        return "'semantic_threshold' must be a finite number between 0.0 and 1.0."
     if offset is not None and engine not in {"brave", "both"}:
         return "The 'offset' option is only supported for brave and both engines."
     if offset is not None and offset < 0:
@@ -2579,13 +2681,7 @@ def validate_execution_options(engine, offset=None, cache_ttl=DEFAULT_CACHE_TTL_
         return "'cache_ttl' must be greater than 0."
     if cache_ttl > DEFAULT_CACHE_TTL_MINUTES:
         return f"'cache_ttl' cannot exceed {DEFAULT_CACHE_TTL_MINUTES} minutes (90 days)."
-    if not 0.0 <= semantic_threshold <= 1.0:
-        return "'semantic_threshold' must be between 0.0 and 1.0."
     if result_limit is not None:
-        try:
-            result_limit=int(result_limit)
-        except (TypeError, ValueError):
-            return "'result_limit' must be an integer."
         if result_limit < 1:
             return "'result_limit' must be greater than or equal to 1."
     try:
@@ -2606,11 +2702,7 @@ def _resolve_batch_max_workers(config, max_workers=None):
     """Resolve and validate effective batch concurrency."""
     if max_workers is None:
         max_workers = config.getint("Batch", "max_workers", fallback=4)
-    try:
-        max_workers = int(max_workers)
-    except (TypeError, ValueError) as e:
-        raise ValueError("'max_workers' must be a positive integer.") from e
-    if max_workers <= 0:
+    if type(max_workers) is not int or max_workers <= 0:
         raise ValueError("'max_workers' must be a positive integer.")
     return max_workers
 
@@ -2624,7 +2716,7 @@ def _batch_request_fingerprint(query, engine, offset, cache, cache_ttl, semantic
         bool(cache),
         int(cache_ttl),
         bool(semantic_cache),
-        round(float(semantic_threshold), 6),
+        semantic_threshold,
         bool(flaresolverr),
         tuple(_normalize_host_filters(include_hosts)),
         tuple(_normalize_host_filters(exclude_hosts)),
@@ -2640,8 +2732,7 @@ def _coerce_batch_query(entry):
         query=entry.get("url")
     if query is None:
         return None
-    query=str(query).strip()
-    return query or None
+    return query.strip() if isinstance(query, str) else None
 
 def load_batch_requests(batch_file):
     """Load batch requests from a JSON array/object or JSONL file."""
@@ -2685,7 +2776,7 @@ def load_batch_requests(batch_file):
 
     if not isinstance(requests_payload, list) or not requests_payload:
         raise ValueError("'requests' must be a non-empty list.")
-    if defaults and not isinstance(defaults, dict):
+    if not isinstance(defaults, dict):
         raise ValueError("'defaults' must be an object when provided.")
     return requests_payload, defaults
 
@@ -2693,7 +2784,7 @@ def execute_batch(requests_payload, config, defaults=None, max_workers=None):
     """Execute a batch of heterogeneous requests while isolating per-item failures."""
     if not isinstance(requests_payload, list) or not requests_payload:
         raise ValueError("'requests' must be a non-empty list.")
-    defaults=defaults or {}
+    defaults={} if defaults is None else defaults
     if not isinstance(defaults, dict):
         raise ValueError("'defaults' must be an object when provided.")
     resolved_max_workers = min(len(requests_payload), _resolve_batch_max_workers(config, max_workers=max_workers))
@@ -2733,6 +2824,8 @@ def execute_batch(requests_payload, config, defaults=None, max_workers=None):
             include_hosts=request_data["include_hosts"],
             exclude_hosts=request_data["exclude_hosts"],
             result_limit=request_data["result_limit"],
+            cache=request_data["cache"],
+            semantic_cache=request_data["semantic_cache"],
         )
         if option_error:
             return None, {"index": idx, "engine": engine, "query": query, "error": option_error}
@@ -2900,7 +2993,11 @@ def execute_engine(query, engine, config, offset=None, flaresolverr=False):
 def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=DEFAULT_CACHE_TTL_MINUTES, semantic_cache=False, semantic_threshold=0.9, flaresolverr=False, include_hosts=None, exclude_hosts=None, result_limit=None):
     """Run a query through cache + engine execution and return a structured result."""
     started=time.time()
-    prune_cache()
+    if engine not in VALID_ENGINES:
+        raise ValueError(f"Unsupported engine: {engine}")
+    query_error = validate_query(query, engine)
+    if query_error:
+        raise ValueError(query_error)
     normalized_include=_normalize_host_filters(include_hosts)
     normalized_exclude=_normalize_host_filters(exclude_hosts)
     option_error = validate_execution_options(
@@ -2912,9 +3009,12 @@ def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=DEF
         include_hosts=normalized_include,
         exclude_hosts=normalized_exclude,
         result_limit=result_limit,
+        cache=cache,
+        semantic_cache=semantic_cache,
     )
     if option_error:
         raise ValueError(option_error)
+    prune_cache()
     normalized_result_limit=None if result_limit is None else int(result_limit)
 
     use_cache = cache or semantic_cache
@@ -2934,7 +3034,7 @@ def execute_query(query, engine, config, offset=None, cache=False, cache_ttl=DEF
         result = execute_engine(query, engine, config, offset=offset, flaresolverr=flaresolverr)
         if use_cache:
             cache_status="miss"
-        if use_cache:
+        if use_cache and is_cacheable_result(result):
             cache_key = get_cache_key(query, engine, offset)
             write_to_cache(query, engine, offset, result)
             if use_semantic:
@@ -3060,8 +3160,8 @@ def main():
                 "offset": None,
                 "result_limit": None,
                 "flaresolverr": False,
-                "include_hosts": None,
-                "exclude_hosts": None,
+                "include_hosts": [],
+                "exclude_hosts": [],
             }
             for key, value in cli_defaults.items():
                 default_value = cli_default_values[key]
@@ -3102,15 +3202,14 @@ def main():
                         if first.get("title"):
                             print(first["title"])
                     print()
+            if batch_result.get("has_errors") or any(item.get("has_partial_failure") for item in batch_result["results"]):
+                sys.exit(1)
             return
 
         if not args.query:
             parser.error("the following arguments are required: query")
         if not args.engine:
             parser.error("the following arguments are required: -e/--engine")
-
-        if args.flaresolverr and args.engine == "fetch" and not config.get('Fetch', 'flaresolverr_url', fallback='').strip():
-            sys.stderr.write("WARNING: --flaresolverr flag set but no flaresolverr_url configured in config.ini.\n")
 
         result = execute_query(
             args.query,
@@ -3217,6 +3316,9 @@ def main():
                         print(f"chunks: {len(result['chunks'])}")
                     print()
                     print(result["content"])
+
+        if result.get("error") or result.get("has_partial_failure"):
+            sys.exit(1)
 
     except ValueError as e:
         sys.stderr.write(f"ERROR: {e}\n")

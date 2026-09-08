@@ -7,7 +7,9 @@ Runs alongside the existing Flask HTTP API without modifying it.
 """
 import os
 import sys
+from functools import wraps
 from typing import Literal
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -24,7 +26,6 @@ from ccsearch import (
     execute_query,
     get_diagnostics,
     list_engines,
-    mask_secret,
     validate_query,
     validate_execution_options,
     DEFAULT_CACHE_TTL_MINUTES,
@@ -53,7 +54,17 @@ mcp=FastMCP(
 # ---------------------------------------------------------------------------
 EngineType=Literal["brave", "perplexity", "both", "llm-context"]
 
-@mcp.tool()
+def threaded_tool(function):
+    """Keep blocking network/cache work off FastMCP's shared event loop."""
+    @wraps(function)
+    async def invoke(**kwargs):
+        return await run_in_threadpool(function, **kwargs)
+
+    mcp.tool()(invoke)
+    return function
+
+
+@threaded_tool
 def search(
     query: str,
     engine: EngineType="brave",
@@ -83,7 +94,7 @@ def search(
     config=load_config(CONFIG_PATH)
     validation_error=validate_query(query, engine)
     if validation_error:
-        return {"error": validation_error}
+        raise ValueError(validation_error)
     option_error=validate_execution_options(
         engine,
         offset=offset,
@@ -92,28 +103,30 @@ def search(
         include_hosts=include_hosts,
         exclude_hosts=exclude_hosts,
         result_limit=result_limit,
+        cache=cache,
+        semantic_cache=semantic_cache,
     )
     if option_error:
-        return {"error": option_error}
-    try:
-        return execute_query(
-            query,
-            engine,
-            config,
-            offset=offset,
-            cache=cache,
-            cache_ttl=cache_ttl,
-            semantic_cache=semantic_cache,
-            semantic_threshold=semantic_threshold,
-            include_hosts=include_hosts,
-            exclude_hosts=exclude_hosts,
-            result_limit=result_limit,
-        )
-    except (ValueError, RuntimeError) as e:
-        return {"error": str(e)}
+        raise ValueError(option_error)
+    result = execute_query(
+        query,
+        engine,
+        config,
+        offset=offset,
+        cache=cache,
+        cache_ttl=cache_ttl,
+        semantic_cache=semantic_cache,
+        semantic_threshold=semantic_threshold,
+        include_hosts=include_hosts,
+        exclude_hosts=exclude_hosts,
+        result_limit=result_limit,
+    )
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    return result
 
 
-@mcp.tool()
+@threaded_tool
 def fetch(
     url: str,
     flaresolverr: bool=False,
@@ -136,39 +149,37 @@ def fetch(
         "fetch",
         cache_ttl=cache_ttl,
         flaresolverr=flaresolverr,
+        cache=cache,
     )
     if option_error:
         raise ValueError(option_error)
-    try:
-        result=execute_query(
-            url,
-            "fetch",
-            config,
-            cache=cache,
-            cache_ttl=cache_ttl,
-            flaresolverr=flaresolverr,
-        )
-    except (ValueError, RuntimeError) as e:
-        raise RuntimeError(str(e)) from e
+    result=execute_query(
+        url,
+        "fetch",
+        config,
+        cache=cache,
+        cache_ttl=cache_ttl,
+        flaresolverr=flaresolverr,
+    )
     if isinstance(result, dict) and result.get("error"):
         raise RuntimeError(result["error"])
     return result
 
-@mcp.tool()
+@threaded_tool
 def engines() -> dict:
     """List available search and fetch engines."""
     config=load_config(CONFIG_PATH)
     return {"engines": list_engines(), "diagnostics": get_diagnostics(config, include_engines=False)}
 
 
-@mcp.tool()
+@threaded_tool
 def diagnostics() -> dict:
     """Return runtime diagnostics without exposing secret values."""
     config=load_config(CONFIG_PATH)
     return get_diagnostics(config)
 
 
-@mcp.tool()
+@threaded_tool
 def batch(
     requests: list[dict],
     engine: str|None=None,
@@ -212,10 +223,7 @@ def batch(
     }
     if engine:
         defaults["engine"]=engine
-    try:
-        return execute_batch(requests, config, defaults=defaults, max_workers=max_workers)
-    except ValueError as e:
-        return {"error": str(e)}
+    return execute_batch(requests, config, defaults=defaults, max_workers=max_workers)
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +252,10 @@ if __name__=="__main__":
         )
 
         print(f"[ccsearch-mcp] Starting MCP server on port {PORT} (path auth: {'enabled' if API_KEY else 'DISABLED'})")
-        print(f"[ccsearch-mcp] API key source: {'environment' if os.environ.get('CCSEARCH_API_KEY') else KEY_FILE} ({mask_secret(API_KEY)})")
+        print(f"[ccsearch-mcp] API key source: {'environment' if os.environ.get('CCSEARCH_API_KEY') else KEY_FILE}")
         print(f"[ccsearch-mcp] SSE: /<key>/sse | Streamable HTTP: /<key>/mcp")
-        config=uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+        # Auth is part of the URL path: ordinary access logs would disclose it.
+        config=uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info", access_log=False)
         server=uvicorn.Server(config)
         await server.serve()
 
