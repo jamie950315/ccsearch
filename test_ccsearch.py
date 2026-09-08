@@ -23,18 +23,6 @@ import requests
 import ccsearch
 
 
-def setUpModule():
-    # Never let inherited production credentials enter mocked assertions or calls.
-    global _isolated_credentials
-    environment = {key: value for key, value in os.environ.items() if "API_KEY" not in key}
-    _isolated_credentials = patch.dict(os.environ, environment, clear=True)
-    _isolated_credentials.start()
-
-
-def tearDownModule():
-    _isolated_credentials.stop()
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -3426,7 +3414,8 @@ class TestMainCLI(unittest.TestCase):
 
     # ---- LLM Context engine ----
 
-    def test_llm_context_missing_api_key(self):
+    @patch('ccsearch._select_brave_api_key', return_value=(None, None))
+    def test_llm_context_missing_api_key(self, mock_key):
         env_backup_s = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
         env_backup_b = os.environ.pop('BRAVE_API_KEY', None)
         try:
@@ -3440,7 +3429,8 @@ class TestMainCLI(unittest.TestCase):
                 os.environ['BRAVE_API_KEY'] = env_backup_b
 
     @patch('ccsearch.perform_llm_context_search')
-    def test_llm_context_prefers_search_key(self, mock_lc):
+    @patch('ccsearch._next_brave_key_index', return_value=0)
+    def test_llm_context_prefers_search_key(self, mock_index, mock_lc):
         """BRAVE_SEARCH_API_KEY takes priority over BRAVE_API_KEY."""
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
@@ -3453,7 +3443,8 @@ class TestMainCLI(unittest.TestCase):
         mock_lc.assert_called_once_with("test", "search_key", unittest.mock.ANY)
 
     @patch('ccsearch.perform_llm_context_search')
-    def test_llm_context_falls_back_to_brave_key(self, mock_lc):
+    @patch('ccsearch._select_brave_api_key', return_value=('fallback_key', 'BRAVE_API_KEY'))
+    def test_llm_context_falls_back_to_brave_key(self, mock_key, mock_lc):
         """Falls back to BRAVE_API_KEY when BRAVE_SEARCH_API_KEY is not set."""
         env_backup = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
         try:
@@ -3515,7 +3506,8 @@ class TestMainCLI(unittest.TestCase):
 
     # ---- Brave engine ----
 
-    def test_brave_missing_api_key(self):
+    @patch('ccsearch._select_brave_api_key', return_value=(None, None))
+    def test_brave_missing_api_key(self, mock_key):
         env_backup_s = os.environ.pop('BRAVE_SEARCH_API_KEY', None)
         env_backup_b = os.environ.pop('BRAVE_API_KEY', None)
         try:

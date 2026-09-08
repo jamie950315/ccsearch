@@ -193,7 +193,7 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 Read-only status checks:
 
 ```bash
-systemctl status ccsearch-api.service ccsearch-mcp.service cloudflared.service
+systemctl status ccsearch-api.service ccsearch-mcp.service cloudflared-a1.service
 docker ps --filter name=flaresolverr
 ss -ltnp | rg ':(8888|8890|8191)\b'
 curl -fsS http://127.0.0.1:8888/health
@@ -215,7 +215,7 @@ Before declaring a change complete:
 
 ```bash
 python3 -m py_compile ccsearch.py api_server.py mcp_server.py test_ccsearch.py
-python3 -m unittest -v test_ccsearch.py
+python3 -m unittest discover -v
 python3 ccsearch.py --doctor --format json
 python3 ccsearch.py --list-engines --format json
 ```
@@ -249,4 +249,4 @@ Also run checks proportional to the changed surface:
 - Empty authentication files fail closed; concurrent first starts atomically publish one complete 0600 key. Existing unreadable configuration fails explicitly.
 - Missing provider answers/error envelopes fail rather than becoming successful empty responses. `both` keeps partial output but sets top-level `error` if both engines fail.
 - Fetch fallback is limited to expected transport/browser errors, not programming exceptions. Unresolved challenges and empty document conversions fail. MarkItDown uses its single file conversion API; MIME types take precedence over dynamic URL suffixes.
-- Review regression suites are `test_review_*.py`; use `python3 -m unittest discover -v` to include them along with the original suite. Tests must not inherit real provider keys into mocked assertions.
+- Review regression suites are `test_review_*.py`; use `python3 -m unittest discover -v` to include them along with the original suite. Do not globally clear inherited provider credentials. Key-selection and missing-key tests use explicit fixtures; the loopback MCP server keeps its disposable authentication key.

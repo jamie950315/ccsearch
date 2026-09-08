@@ -113,8 +113,9 @@ ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 *Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.* The default and maximum readable age is 90 days (`129600` minutes). A smaller `--cache-ttl` shortens the freshness window. Beginning on day 91, result files are deleted by the hourly maintenance timer or the next cache cleanup pass. Run `ccsearch --prune-cache --format json` to enforce retention immediately.
 
 For the `fetch` engine, URLs are normalized before hashing so cache hits survive:
+
 - tracking parameters such as `utm_*`, `fbclid`, `gclid`, etc.
-- query parameter reordering
+- query parameter name reordering (the order of repeated values is preserved)
 - fragment-only differences
 - host casing and default port differences
 
@@ -639,4 +640,4 @@ python3 ccsearch.py --doctor --format json
 python3 ccsearch.py --list-engines --format json
 ```
 
-Tests isolate inherited provider credentials. Live upstream, public-route, and deployment checks are separate from this suite.
+The suite does not clear inherited provider credentials globally. Individual tests use explicit fixtures for key selection and missing-key scenarios; the loopback MCP test server uses a disposable authentication key. Live upstream, public-route, and deployment checks are separate from this suite.

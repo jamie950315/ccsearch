@@ -87,15 +87,17 @@ flaresolverr_url =
 # Maximum time (ms) to wait for FlareSolverr to solve a challenge.
 flaresolverr_timeout = 60000
 
-# Strategy: "fallback" = try direct fetch first, use FlareSolverr only on failure.
-#           "always"   = always use FlareSolverr for every fetch request.
+# Strategy: "fallback" = direct fetch first; render eligible challenges/SPA shells
+#                       or retry transport failures. Ordinary HTTP errors remain errors.
+#           "always"   = use FlareSolverr directly; requires flaresolverr_url.
 #           "never"    = never use FlareSolverr even if configured.
 flaresolverr_mode = fallback
 
 # SPA auto-detection: When flaresolverr_mode = fallback, the fetch engine automatically
 # detects JS-heavy SPA shells (empty mount points like <div id="root">, script-heavy pages
 # with little text) and falls back to FlareSolverr for headless rendering.
-# No configuration needed — detection is based on HTML structure, not a fixed char threshold.
+# Detection combines HTML structure with text-length thresholds. Empty rendered
+# content and unresolved challenges are reported as errors.
 
 [Batch]
 # Maximum number of worker threads used by batch execution.

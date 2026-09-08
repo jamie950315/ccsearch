@@ -46,8 +46,7 @@ class TestLocalMcpTransport(unittest.TestCase):
         cls.base = f"http://127.0.0.1:{cls.port}"
         environment = {
             key: value for key, value in os.environ.items()
-            if not key.startswith("BRAVE_") and key not in {"OPENROUTER_API_KEY", "CCSEARCH_API_KEY"}
-            and not key.lower().endswith("_proxy")
+            if not key.lower().endswith("_proxy")
         }
         environment.update(CCSEARCH_API_KEY=cls.key, CCSEARCH_MCP_PORT=str(cls.port))
         root = Path(__file__).resolve().parent
