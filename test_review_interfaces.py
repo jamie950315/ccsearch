@@ -66,6 +66,11 @@ class TestHttpRequestBoundaries(unittest.TestCase):
         response = self.client.get("/diagnostics", headers={"X-API-Key": "\u00e9"})
         self.assertEqual(response.status_code, 401)
 
+    def test_total_search_failure_uses_500_not_fetch_424(self):
+        with patch.object(self.api, "execute_query", return_value={"error": "Both search engines failed."}):
+            response = self.client.post('/search', json={'query': 'q', 'engine': 'both'}, headers=self.headers)
+        self.assertEqual(response.status_code, 500)
+
     def test_unexpected_exception_is_logged_not_silently_converted(self):
         with patch.object(self.api, "load_config"), patch.object(
             self.api, "execute_query", side_effect=RuntimeError("upstream unavailable")

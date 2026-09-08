@@ -2145,6 +2145,8 @@ def _detect_cloudflare(response):
 
 def _simple_fetch(url, maxRetries=2):
     """Fetch a webpage. Uses curl_cffi for TLS impersonation when available, otherwise requests.Session."""
+    if type(maxRetries) is not int or maxRetries < 0:
+        raise ValueError("max_retries must be a non-negative integer.")
     if HAS_CURL_CFFI:
         for attempt in range(maxRetries+1):
             session=cffi_requests.Session(impersonate="chrome")

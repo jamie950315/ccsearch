@@ -143,7 +143,7 @@ def search():
             result_limit=result_limit,
         )
         if isinstance(result, dict) and result.get("error"):
-            return jsonify(result), 424
+            return jsonify(result), 424 if engine == "fetch" else 500
         return jsonify(result)
 
     except ValueError as e:

@@ -45,6 +45,10 @@ def pdf_fixture():
 
 
 class FetchReviewTests(unittest.TestCase):
+    def test_negative_retries_fail_before_client_selection(self):
+        with patch('ccsearch.HAS_CURL_CFFI', True), self.assertRaisesRegex(ValueError, 'max_retries'):
+            ccsearch._simple_fetch('https://example.com', -1)
+
     @unittest.skipUnless(importlib.util.find_spec("markitdown") and importlib.util.find_spec("pdfminer"), "requires standard PDF dependencies")
     def test_real_http_pdf_conversion_from_dynamic_url(self):
         pdf = pdf_fixture()
