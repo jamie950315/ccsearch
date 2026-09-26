@@ -17,3 +17,7 @@ venv/
 
 # API key file
 .api_key
+
+# Deployment-specific notes (hosts, routes, paths); the repository is public
+DEPLOYMENT.local.md
+*.local.md

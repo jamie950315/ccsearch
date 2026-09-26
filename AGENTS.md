@@ -1,6 +1,8 @@
 # ccsearch
 
-This file is the project briefing for assistants. It covers architecture, working rules, and the last verified deployment state. Re-check live state before relying on the snapshot because services and untracked configuration can change independently of Git.
+This file is the project briefing for assistants. It covers architecture and working rules. The repository is public, so this file must stay generic: no host names, domains, IP addresses, filesystem paths, service inventories, or operational history for a specific deployment.
+
+Deployment-specific notes live in `DEPLOYMENT.local.md`, which is ignored by Git. If it exists, read it before any deployment or operations work, keep it updated after deployments, and never commit it or copy its contents into tracked files. Re-check live state before relying on it.
 
 ## Project Shape
 
@@ -128,38 +130,15 @@ Keep the MCP server thin and forward into shared execution logic.
 - The standard requirements currently install `fastembed` for semantic cache and `curl_cffi` for direct-fetch TLS impersonation. The code degrades gracefully if either is unavailable.
 - The standard requirements include `markitdown[pdf]`; additional MarkItDown extras are optional for Office formats.
 
-## Verified Deployment
+## Deployment Model
 
-Runtime and public routes re-verified on 2026-09-26 after the agent-improvements release (`be1bf1d`). All 543 tests pass on Mac and A1-JP, including loopback HTTP/PDF and both MCP transports. Public Brave (default 8 results, `freshness`, `published_at`), LLM Context (8 results, 5 snippets), direct fetch (Cursor docs, openai.com), Discourse and V2EX site APIs, forced FlareSolverr fetch, focus extraction, preserved HTTP 404 without fallback, `perplexity-verify`, batch dispatch/result dedupe, quota diagnostics, and SSE/Streamable HTTP calls including the new `verify` tool pass. The primary deployment is A1-JP, an Ubuntu 24.04 ARM64 Oracle A1 instance in Osaka. A1-US is the first application rollback host: its code, untracked configuration, stopped containers, data, and migration backup remain available, while its API, MCP, cache timer, and Cloudflare connector are disabled and inactive. The Raspberry Pi 5 checkout is a second cold standby: its API and MCP services remain disabled and inactive. Do not start either standby unless the user explicitly chooses to fail over.
+A deployment typically runs `api_server.py` and `mcp_server.py` as separate long-running services (for example systemd units that load `.env` with `EnvironmentFile=` and restart automatically), the checked-in `ccsearch-cache-prune.timer` under `systemd/`, a loopback-only FlareSolverr container from `docker-compose.yml`, and a reverse proxy or tunnel for public HTTPS routes.
 
-| Component | Live state | Binding / public route |
-| --- | --- | --- |
-| HTTP API | `ccsearch-api.service`, enabled and running as `ubuntu` on A1-JP | `0.0.0.0:8888`, `https://ccsearch.0ruka.dev` |
-| MCP | `ccsearch-mcp.service`, enabled and running as `ubuntu` on A1-JP | `0.0.0.0:8890`, `https://ccsearch-mcp.0ruka.dev` |
-| Cache cleanup | `ccsearch-cache-prune.timer`, enabled and active | Hourly; deletes result files beginning on day 91 |
-| FlareSolverr | Docker container `flaresolverr`, image `ghcr.io/flaresolverr/flaresolverr:latest` | `127.0.0.1:8191` only |
-| Public ingress | `cloudflared-a1.service`, enabled and running on A1-JP | `/etc/cloudflared/a1-services.yml` maps the two public hostnames above to localhost |
-
-The A1-JP API and MCP units live in `/etc/systemd/system/`, use `WorkingDirectory=/home/ubuntu/ccsearch`, load `/home/ubuntu/ccsearch/.env` with systemd `EnvironmentFile=`, and restart automatically. Their source unit files are not checked in. The cache-maintenance service and timer are reproducible under `systemd/`.
-
-The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
-
-Operational notes: on 2026-09-26 the host-wide pending systemd reload on A1-JP was applied after confirming that the loaded ccsearch-api, ccsearch-mcp, cloudflared-a1, derper, and executor-turn definitions matched their unit files. No service restarted, no unit reports `NeedDaemonReload=yes`, and public checks pass. MCP 1.26 also emits a Pydantic `IncompleteFieldDefinitionWarning` at startup; both transports are verified despite that upstream warning.
-
-FlareSolverr has no authentication and is bound to localhost only. The checked-in compose file publishes `127.0.0.1:8191:8191`. A1-JP, the A1-US rollback copy, and Pi5 all have that loopback binding. On 2026-09-03, Pi5's running `flaresolverr` container was listening on `127.0.0.1:8191` only; its ccsearch API and MCP services remained disabled. Do not publish port `8191` on all interfaces if compose is recreated.
-
-### Current Non-secret Runtime Configuration
-
-The live, untracked `config.ini` differs from `config.ini.example`:
-
-- Brave: three Search API keys on A1-JP, round-robin per live request, with a per-key cross-process limiter shared by Web Search, LLM Context, CLI, HTTP, MCP, batch workers, and retries; 20 results, safesearch off, 2 retries. Traffic from other hosts using the same subscriptions is not visible to this limiter.
-- Perplexity: `perplexity/sonar-pro-search`, citations on, temperature 0.1, 16,384 max tokens, 2 retries.
-- LLM Context: 30 results, 16,384 max tokens, 20 URLs, lenient threshold, 2 retries.
-- Fetch: `http://localhost:8191/v1`, 60-second FlareSolverr timeout, fallback mode.
-- Batch: effective default is 4 workers (the code default is used when `[Batch]` is absent).
-- `curl_cffi`, `fastembed`, `markitdown[pdf]`, and `mcp` are installed; all search engine credentials are present in the service environment.
-
-Treat these as a dated operational snapshot, not portable defaults. `config.ini.example` remains the conservative setup template.
+- Bind FlareSolverr to `127.0.0.1` only; it has no authentication. Do not publish port `8191` on all interfaces if compose is recreated.
+- Keep the API and MCP ports unreachable from the Internet except through the proxy or tunnel.
+- The HTTP service runs Flask's built-in server directly. It is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
+- MCP 1.26 emits a Pydantic `IncompleteFieldDefinitionWarning` at startup; both transports work despite it.
+- A live `config.ini` may differ from `config.ini.example`; record deployment-specific values in `DEPLOYMENT.local.md`, not here. `config.ini.example` remains the conservative setup template.
 
 ## Secrets and Configuration
 
@@ -173,31 +152,29 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 
 ## Canonical Development and Deployment Workflow
 
-- Treat the Mac working copy as the canonical authoring workspace. A1-JP,
-  A1-US, and Pi5 are deployment targets, not normal code-editing locations.
-- Before making changes, inspect the Mac working tree and preserve any existing
+- Treat the local working copy that pushes to GitHub as the canonical authoring
+  workspace. Deployment hosts are targets, not normal code-editing locations.
+- Before making changes, inspect the working tree and preserve any existing
   unexplained work. Never overwrite or mix unrelated modifications.
-- Implement and test changes on the Mac working copy when its required
-  dependencies are available. Use the A1-JP virtual environment for additional
-  Linux or ARM64 verification when needed.
-- Commit approved changes on the Mac and push them to `origin/main` before
-  deploying them.
-- Deployment hosts use the public HTTPS GitHub remote for fetches. Only the Mac
-  working copy pushes releases; never copy the Mac GitHub private key to A1-JP,
-  A1-US, or Pi5.
-- Deploy production changes by fast-forwarding A1-JP to the exact verified
-  commit. Preserve its untracked `.env`, `.api_key`, and `config.ini`.
+- Implement and test changes on the authoring copy when its required
+  dependencies are available; use a deployment host's environment for extra
+  platform verification when needed.
+- Commit approved changes and push them to `origin/main` before deploying them.
+- Deployment hosts fetch over the public HTTPS remote. Never copy the authoring
+  machine's GitHub private key to a deployment host.
+- Deploy production changes by fast-forwarding the production checkout to the
+  exact verified commit. Preserve its untracked `.env`, `.api_key`, and
+  `config.ini`.
 - Restart only the services affected by the change. Documentation-only changes
   must not restart services.
-- Verify the affected CLI, HTTP API, MCP tools, Docker services, systemd units,
-  and public Cloudflare endpoints in proportion to the change.
-- After A1-JP passes production verification, fast-forward A1-US and Pi5 to the
-  same commit for rollback readiness. Do not start their ccsearch API, MCP,
-  cache, or public connector services.
-- Finish by confirming that Mac, GitHub, A1-JP, A1-US, and Pi5 reference the
-  same commit and that no unexpected tracked changes remain.
-- If an emergency edit is ever made directly on a deployment host, copy it
-  back into the Mac working copy, test it, commit it, and resynchronize every
+- Verify the affected CLI, HTTP API, MCP tools, Docker services, service units,
+  and public routes in proportion to the change.
+- After production passes verification, fast-forward any standby hosts to the
+  same commit for rollback readiness without starting their services.
+- Finish by confirming that every checkout references the same commit and that
+  no unexpected tracked changes remain.
+- If an emergency edit is ever made directly on a deployment host, copy it back
+  into the authoring copy, test it, commit it, and resynchronize every
   deployment target before considering the work complete.
 
 ## Operations
@@ -205,7 +182,7 @@ Treat these as a dated operational snapshot, not portable defaults. `config.ini.
 Read-only status checks:
 
 ```bash
-systemctl status ccsearch-api.service ccsearch-mcp.service cloudflared-a1.service
+systemctl status ccsearch-api.service ccsearch-mcp.service
 docker ps --filter name=flaresolverr
 ss -ltnp | rg ':(8888|8890|8191)\b'
 curl -fsS http://127.0.0.1:8888/health
@@ -242,12 +219,12 @@ Also run checks proportional to the changed surface:
 - Fetch: test direct HTML extraction and, when relevant, the running FlareSolverr fallback.
 - Fetch results containing `error` are failures even when transport metadata is present. Preserve ordinary HTTP errors, verify binary conversion with a real document, and reject empty browser-rendered content.
 - Fetch fallback: check `served_from` and `attempts` on a Cloudflare-protected page, a Discourse topic (for example linux.do), and a 404 page (must not fall back).
-- Deployment: check systemd state, listeners, redacted recent logs, Docker state, and public Cloudflare routes.
+- Deployment: check service state, listeners, redacted recent logs, Docker state, and public routes.
 
 ## Documentation Sync Rules
 
 - Public CLI, response, engine, or option changes: update `README.md`, both files under `skills/`, and tests together.
-- Deployment changes: update this live snapshot and the deployment sections in `README.md`; never place credentials or tunnel IDs in tracked files.
+- Deployment changes: update `DEPLOYMENT.local.md`. Never place credentials, tunnel IDs, host names, domains, IP addresses, or deployment paths in tracked files.
 - Cache freshness defaults to and is capped at 90 days. Files are unreadable after 90 days and deleted beginning on day 91 by the hourly timer or the next cleanup pass; keep exact and semantic cache behavior synchronized.
 - `offset` is supported by `brave` and `both`.
 - HTTP non-health endpoints use `X-API-Key`; MCP uses the key as a path prefix.
