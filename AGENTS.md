@@ -144,7 +144,7 @@ The A1-JP API and MCP units live in `/etc/systemd/system/`, use `WorkingDirector
 
 The HTTP service runs Flask's built-in server directly. It is systemd-managed but is not yet a production WSGI/ASGI deployment; replacement remains in `TODO.md`.
 
-Operational notes from the 2026-09-08 verification: API/MCP report `NeedDaemonReload=yes` for pre-existing unit-file changes; this release does not alter or reload those units. Running user/directory/restart policy agree with disk, services have zero automatic restarts, and public checks pass. Review the remaining unit directives before applying a host-wide reload. MCP 1.26 also emits a Pydantic `IncompleteFieldDefinitionWarning` at startup; both transports are verified despite that upstream warning.
+Operational notes: on 2026-09-26 the host-wide pending systemd reload on A1-JP was applied after confirming that the loaded ccsearch-api, ccsearch-mcp, cloudflared-a1, derper, and executor-turn definitions matched their unit files. No service restarted, no unit reports `NeedDaemonReload=yes`, and public checks pass. MCP 1.26 also emits a Pydantic `IncompleteFieldDefinitionWarning` at startup; both transports are verified despite that upstream warning.
 
 FlareSolverr has no authentication and is bound to localhost only. The checked-in compose file publishes `127.0.0.1:8191:8191`. A1-JP, the A1-US rollback copy, and Pi5 all have that loopback binding. On 2026-09-03, Pi5's running `flaresolverr` container was listening on `127.0.0.1:8191` only; its ccsearch API and MCP services remained disabled. Do not publish port `8191` on all interfaces if compose is recreated.
 
