@@ -83,7 +83,7 @@ max_retries = 2
 # Leave blank to disable the fallback (direct fetch uses curl_cffi when
 # available, otherwise requests).
 # Requires a running FlareSolverr instance (Docker recommended).
-# Example: http://localhost:8191/v1 or http://pi5.tailnet:8191/v1
+# Example: http://localhost:8191/v1
 flaresolverr_url =
 
 # Maximum time (ms) to wait for FlareSolverr to solve a challenge.

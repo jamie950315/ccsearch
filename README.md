@@ -217,7 +217,7 @@ All endpoints except `/health` require an `X-API-Key` header. The API key is res
 #### `GET /health`
 Health check (no auth required).
 ```bash
-curl https://ccsearch.0ruka.dev/health
+curl https://ccsearch.example.com/health
 # {"status": "ok", "service": "ccsearch-api"}
 ```
 
@@ -296,25 +296,25 @@ Code examples are preserved as fenced Markdown code blocks, and code chunks expo
 
 ```bash
 # Brave search
-curl -X POST https://ccsearch.0ruka.dev/search \
+curl -X POST https://ccsearch.example.com/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{"query": "React 19 new features", "engine": "brave"}'
 
 # Perplexity synthesized answer
-curl -X POST https://ccsearch.0ruka.dev/search \
+curl -X POST https://ccsearch.example.com/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{"query": "What is the difference between Vue 3 and React 18?", "engine": "perplexity"}'
 
 # Fetch a URL
-curl -X POST https://ccsearch.0ruka.dev/search \
+curl -X POST https://ccsearch.example.com/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{"query": "https://react.dev/blog", "engine": "fetch"}'
 
 # With caching
-curl -X POST https://ccsearch.0ruka.dev/search \
+curl -X POST https://ccsearch.example.com/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{"query": "Python asyncio tutorial", "engine": "brave", "cache": true, "cache_ttl": 60}'
@@ -351,7 +351,7 @@ The response includes:
 - `engine_counts`: request count by engine
 
 ```bash
-curl -X POST https://ccsearch.0ruka.dev/batch \
+curl -X POST https://ccsearch.example.com/batch \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
@@ -368,7 +368,7 @@ curl -X POST https://ccsearch.0ruka.dev/batch \
 #### `GET /engines`
 List available engines and their server-side capabilities.
 ```bash
-curl https://ccsearch.0ruka.dev/engines \
+curl https://ccsearch.example.com/engines \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -392,7 +392,7 @@ Examples: `offset` is only valid for `brave` / `both`, and `flaresolverr` is onl
 #### `GET /diagnostics`
 Return runtime diagnostics without exposing secret values.
 ```bash
-curl https://ccsearch.0ruka.dev/diagnostics \
+curl https://ccsearch.example.com/diagnostics \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -408,11 +408,11 @@ The response includes:
 
 ### Deployment
 
-The primary deployment runs on the A1-JP Ubuntu ARM64 host in Osaka. Its API server runs as `ccsearch-api.service` with `Restart=always` and a five-second restart delay. The unit at `/etc/systemd/system/ccsearch-api.service` loads `/home/ubuntu/ccsearch/.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first. A1-US is the first rollback host and the Pi 5 checkout is a second cold standby; their ccsearch services and public connectors remain disabled until an explicit failover.
+A typical deployment runs the API server as a systemd service (for example `ccsearch-api.service` with `Restart=always`) whose unit loads the project's `.env` through systemd's `EnvironmentFile=` setting. The Python program does not load `.env` itself, so manual runs must export the variables first. Standby hosts can keep an up-to-date checkout with their services disabled until an explicit failover.
 
 `ccsearch-cache-prune.timer` runs the checked-in `systemd/ccsearch-cache-prune.service` hourly so files that have reached day 91 are removed even when they are never requested again.
 
-This service currently starts Flask's built-in server directly. It is suitable for the existing personal deployment but is not a production WSGI/ASGI setup; replacing it remains tracked in `TODO.md`.
+This service currently starts Flask's built-in server directly. It is suitable for a personal deployment but is not a production WSGI/ASGI setup; replacing it remains tracked in `TODO.md`.
 
 ```bash
 sudo systemctl enable ccsearch-api   # Enable on boot
@@ -421,13 +421,13 @@ sudo systemctl status ccsearch-api   # Check status
 journalctl -u ccsearch-api -f        # View logs
 ```
 
-The A1-JP service is exposed publicly via Cloudflare Tunnel at `ccsearch.0ruka.dev`. FlareSolverr is bound to `127.0.0.1:8191` by the checked-in compose file and is not publicly reachable.
+Expose the service publicly through a reverse proxy or tunnel (for example Cloudflare Tunnel) rather than opening port 8888 directly; keep the API and MCP ports firewalled from the Internet. FlareSolverr is bound to `127.0.0.1:8191` by the checked-in compose file and is not publicly reachable.
 
 ---
 
 ## MCP Server
 
-`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. On the primary A1-JP deployment, systemd loads the same `.env` into both processes; manual runs must export those variables themselves.
+`mcp_server.py` exposes ccsearch as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over both SSE and Streamable HTTP transport. It runs as an independent process alongside the Flask HTTP API, sharing the same `ccsearch.py` core and `config.ini`. In a systemd deployment, both units load the same `.env`; manual runs must export those variables themselves.
 
 ### Architecture
 
@@ -455,8 +455,8 @@ The MCP server instructions and every tool description state which engine to use
 Path-based authentication — the API key is embedded in the URL path:
 
 ```
-SSE:             https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse
-Streamable HTTP: https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/mcp
+SSE:             https://ccsearch-mcp.example.com/<CCSEARCH_API_KEY>/sse
+Streamable HTTP: https://ccsearch-mcp.example.com/<CCSEARCH_API_KEY>/mcp
 ```
 
 Requests to any other path (missing or incorrect key) receive a `401 Unauthorized` response.
@@ -470,7 +470,7 @@ Uvicorn access logging is disabled, but the key-bearing path can still appear in
 {
   "mcpServers": {
     "ccsearch": {
-      "url": "https://ccsearch-mcp.0ruka.dev/<CCSEARCH_API_KEY>/sse"
+      "url": "https://ccsearch-mcp.example.com/<CCSEARCH_API_KEY>/sse"
     }
   }
 }
@@ -481,7 +481,7 @@ Uvicorn access logging is disabled, but the key-bearing path can still appear in
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-async with sse_client("https://ccsearch-mcp.0ruka.dev/<KEY>/sse") as (r, w):
+async with sse_client("https://ccsearch-mcp.example.com/<KEY>/sse") as (r, w):
     async with ClientSession(r, w) as session:
         await session.initialize()
         await session.call_tool("search", {"query": "hello", "engine": "brave"})
@@ -492,7 +492,7 @@ async with sse_client("https://ccsearch-mcp.0ruka.dev/<KEY>/sse") as (r, w):
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as (r, w, _):
+async with streamablehttp_client("https://ccsearch-mcp.example.com/<KEY>/mcp") as (r, w, _):
     async with ClientSession(r, w) as session:
         await session.initialize()
         await session.call_tool("search", {"query": "hello", "engine": "brave"})
@@ -501,10 +501,10 @@ async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as 
 ### Deployment
 
 - **Runtime**: Python 3 with `mcp>=1.26.0,<2` (FastMCP imports used by this project are not compatible with MCP 2.x)
-- **Verified 2026-09-26**: 543 tests pass on Mac and A1-JP; public search, fetch fallback chain (site APIs, direct, FlareSolverr), focus extraction, claim verification, batch dispatch/dedupe, quota diagnostics, and both MCP transports (including `verify`) pass. MCP 1.26 emits an upstream Pydantic startup warning, but both transports work.
+- **Known warning**: MCP 1.26 emits an upstream Pydantic startup warning; both transports work despite it.
 - **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
 - **Systemd service**: `ccsearch-mcp.service`
-- **Cloudflare Tunnel**: `ccsearch-mcp.0ruka.dev → localhost:8890`
+- **Public route**: expose it through a reverse proxy or tunnel (for example `ccsearch-mcp.example.com → localhost:8890`), not by opening the port directly
 
 ```bash
 sudo systemctl enable --now ccsearch-mcp.service

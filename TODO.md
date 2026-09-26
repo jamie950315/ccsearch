@@ -40,7 +40,7 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 
 ## Operations
 
-- Keep FlareSolverr loopback-only on every host. A1-JP, the A1-US rollback copy, and Pi5 now bind `127.0.0.1:8191`; do not republish `0.0.0.0:8191` or `[::]:8191` if compose is recreated.
+- Keep FlareSolverr loopback-only on every host (`127.0.0.1:8191`); do not republish `0.0.0.0:8191` or `[::]:8191` if compose is recreated.
 - Replace MCP URL-path authentication with a mechanism that does not place the shared API key in proxy/client logs. Uvicorn access logging is already disabled.
 - Replace the Flask development server with a production WSGI/ASGI deployment setup.
   - Gunicorn/Uvicorn worker model
