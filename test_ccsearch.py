@@ -1051,7 +1051,7 @@ class TestPerformBothSearch(unittest.TestCase):
         mock_brave.return_value = {"engine": "brave", "results": []}
         mock_pplx.return_value = {"engine": "perplexity", "answer": ""}
         ccsearch.perform_both_search("q", "bk", "pk", _make_config(), offset=3)
-        mock_brave.assert_called_once_with("q", "bk", unittest.mock.ANY, 3)
+        mock_brave.assert_called_once_with("q", "bk", unittest.mock.ANY, 3, None)
 
 
 # ===========================================================================
@@ -2158,7 +2158,7 @@ class TestPerformFetch(unittest.TestCase):
         self.assertEqual(result["canonical_url"], "https://example.com/stories/fetch-test")
         self.assertEqual(result["description"], "Summary text")
         self.assertEqual(result["author"], "Jamie")
-        self.assertEqual(result["published_at"], "2026-04-11T09:00:00Z")
+        self.assertEqual(result["published_at"], "2026-04-11")
         self.assertEqual(result["hostname"], "example.com")
         self.assertGreater(result["content_word_count"], 0)
         self.assertEqual(result["chunk_count"], len(result["chunks"]))
@@ -2945,7 +2945,7 @@ class TestSharedExecutionHelpers(unittest.TestCase):
             clear=True,
         ):
             ccsearch.execute_engine('test', 'brave', self.config)
-        mock_brave.assert_called_once_with('test', 'search', self.config, offset=None)
+        mock_brave.assert_called_once_with('test', 'search', self.config, offset=None, search_options=None)
 
     @patch('ccsearch.perform_both_search')
     def test_execute_engine_both_prefers_search_key(self, mock_both):
@@ -2961,7 +2961,7 @@ class TestSharedExecutionHelpers(unittest.TestCase):
         ):
             ccsearch.execute_engine('test', 'both', self.config)
         mock_both.assert_called_once_with(
-            'test', 'search', 'openrouter', self.config, offset=None
+            'test', 'search', 'openrouter', self.config, offset=None, search_options=None
         )
 
     @patch('ccsearch.perform_llm_context_search')
@@ -2970,7 +2970,7 @@ class TestSharedExecutionHelpers(unittest.TestCase):
         with patch.dict(os.environ, {'BRAVE_SEARCH_API_KEY': 'search-key'}, clear=True):
             result = ccsearch.execute_engine('test', 'llm-context', self.config)
         self.assertEqual(result["engine"], "llm-context")
-        mock_lc.assert_called_once_with('test', 'search-key', self.config)
+        mock_lc.assert_called_once_with('test', 'search-key', self.config, search_options=None)
 
     @patch('ccsearch.perform_fetch')
     def test_execute_engine_flaresolverr_clones_config(self, mock_fetch):
@@ -3025,7 +3025,7 @@ class TestSharedExecutionHelpers(unittest.TestCase):
     def test_execute_query_backfills_semantic_index_on_exact_hit(self, mock_read, mock_backfill):
         mock_read.return_value = {"engine": "brave", "results": []}
         ccsearch.execute_query('test', 'brave', self.config, cache=True, semantic_cache=True)
-        mock_backfill.assert_called_once_with('test', 'brave', None)
+        mock_backfill.assert_called_once_with('test', 'brave', None, variant={})
 
     @patch('ccsearch.read_from_cache', return_value=None)
     @patch('ccsearch.read_from_semantic_cache')
@@ -3371,7 +3371,11 @@ class TestMainCLI(unittest.TestCase):
         out, err, code = self._run_main(['http://x', '-e', 'fetch', '--format', 'json'])
         self.assertEqual(code, 0)
         data = json.loads(out)
-        self.assertEqual(data["fetched_via"], "direct")
+        self.assertEqual(data["content"], "C")
+        # Transport detail moved to verbose output; served_from is the public provenance field.
+        self.assertNotIn("fetched_via", data)
+        out, err, code = self._run_main(['http://x', '-e', 'fetch', '--format', 'json', '--verbose'])
+        self.assertEqual(json.loads(out)["fetched_via"], "direct")
 
     @patch('ccsearch.perform_fetch')
     def test_fetch_engine_text_success(self, mock_pf):
@@ -3440,7 +3444,7 @@ class TestMainCLI(unittest.TestCase):
             ['test', '-e', 'llm-context', '--format', 'json'],
             env={'BRAVE_SEARCH_API_KEY': 'search_key', 'BRAVE_API_KEY': 'pro_key'})
         self.assertEqual(code, 0)
-        mock_lc.assert_called_once_with("test", "search_key", unittest.mock.ANY)
+        mock_lc.assert_called_once_with("test", "search_key", unittest.mock.ANY, search_options={})
 
     @patch('ccsearch.perform_llm_context_search')
     @patch('ccsearch._select_brave_api_key', return_value=('fallback_key', 'BRAVE_API_KEY'))
@@ -3456,7 +3460,7 @@ class TestMainCLI(unittest.TestCase):
                 ['test', '-e', 'llm-context', '--format', 'json'],
                 env={'BRAVE_API_KEY': 'fallback_key'})
             self.assertEqual(code, 0)
-            mock_lc.assert_called_once_with("test", "fallback_key", unittest.mock.ANY)
+            mock_lc.assert_called_once_with("test", "fallback_key", unittest.mock.ANY, search_options={})
         finally:
             if env_backup:
                 os.environ['BRAVE_SEARCH_API_KEY'] = env_backup
@@ -3480,7 +3484,7 @@ class TestMainCLI(unittest.TestCase):
         mock_lc.return_value = {
             "engine": "llm-context", "query": "test",
             "result_count": 1,
-            "results": [{"rank": 1, "url": "http://a", "title": "Title Here", "hostname": "a", "age": "2d", "snippet": "Short intro", "snippets": ["Snippet content"]}],
+            "results": [{"rank": 1, "url": "http://a", "title": "Title Here", "hostname": "a", "age": ["2026-04-01", "2 days ago"], "published_at": "2026-04-01", "snippet": "Short intro", "snippets": ["Snippet content"]}],
         }
         out, err, code = self._run_main(['test', '-e', 'llm-context', '--format', 'text'],
                                          env={'BRAVE_API_KEY': 'k'})
@@ -3489,7 +3493,8 @@ class TestMainCLI(unittest.TestCase):
         self.assertIn("Results: 1", out)
         self.assertNotIn("Sources:", out)
         self.assertIn("Short intro", out)
-        self.assertIn("Age: 2d", out)
+        self.assertIn("Published: 2026-04-01", out)
+        self.assertNotIn("Age:", out)
         self.assertIn("Title Here", out)
         self.assertIn("Snippet content", out)
 

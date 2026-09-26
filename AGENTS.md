@@ -16,7 +16,8 @@ Supported engines:
 - `perplexity`: Perplexity via OpenRouter
 - `both`: Brave and Perplexity combined
 - `llm-context`: Brave LLM Context API
-- `fetch`: direct URL fetch and extraction
+- `fetch`: URL fetch and extraction with a fallback chain
+- `perplexity-verify`: claim-by-claim verification via Perplexity (MCP exposes it as the `verify` tool)
 
 Shared capabilities:
 
@@ -47,16 +48,22 @@ Cache freshness defaults to 90 days and cannot exceed 90 days. A shorter caller-
 
 All Brave attempts, including retries, share a cross-process limiter. Each Brave key has its own window, capped at 50 RPS per key, across the local CLI, HTTP API, and MCP services. Extra keys are selected round-robin for each live request, using however many keys are configured rather than a fixed count of three. The limiter cannot account for other devices using the same Brave subscription.
 
-Search-style engines normalize output for downstream agents: cleaned text, `hostname`, `rank`, host summaries, optional `host_filtering`, optional `result_limiting`, `cache_status`, and `duration_ms`.
+Search-style engines normalize output for downstream agents: cleaned text, `hostname`, `rank`, `published_at` (`YYYY-MM-DD` or null), host summaries, optional `host_filtering`, `result_limiting` (default limit 8 for brave/both/llm-context), `snippet_limiting` (llm-context default 5), optional `freshness_filtering`, `injection_suspected` where AI-directed text was removed, `cache_status`, `cached_at`, and `duration_ms`. `freshness`, `country`, and `search_lang` pass through to Brave and are part of the cache key.
+
+Response shaping (`shape_search_result`, `shape_fetch_result`) runs after cache lookup, so cached payloads stay complete and shaping changes apply to old entries too.
 
 ### Fetch Engine
 
-`fetch` uses a layered flow:
+`fetch` uses a layered flow (`fetch_with_fallbacks` → `perform_fetch` → `_perform_direct_fetch`):
 
-1. `_simple_fetch`
-2. Cloudflare detection
-3. SPA shell detection
-4. optional FlareSolverr fallback
+1. site API for recognized URLs: X/Twitter (fxtwitter), Discourse (`/t/{id}.json`, `/raw/{id}`), Reddit (`.json`), V2EX (API v1); blocked JSON APIs retry through FlareSolverr
+2. `_simple_fetch`
+3. Cloudflare detection (the `challenge-platform` beacon alone is not a challenge on successful pages with text)
+4. SPA shell detection
+5. optional FlareSolverr fallback
+6. `[Fetch] extended_fallbacks`: Brave LLM Context passages whose URL matches the page, then the newest Wayback snapshot. These run only for blocked/unreachable pages, never for 404/410.
+
+Every fetch result carries `attempts`, `served_from`, `ok`, `fetched_at`, and `content_date`. By default the shaped output returns `content` only; `format="chunks"` returns chunks only, `focus`/`focus_k` select BM25-ranked passages, `max_chars` truncates, and `verbose` restores hashes, offsets, section paths, outbound links, and transport headers.
 
 When available, `_simple_fetch` uses `curl_cffi` with Chrome impersonation. Otherwise it falls back to `requests`.
 
@@ -82,7 +89,9 @@ Batch execution lives in the shared core, not the API layer.
 - stable output ordering
 - per-batch summary fields such as `success_count`, `error_count`, `duration_ms`, and `deduped_count`
 
-The batch dedupe fingerprint includes engine, normalized query, offset, cache settings, flaresolverr, host filters, and result limit.
+Dispatch: `url` → fetch, `query` → search engine (entry engine, else default engine, else brave), explicit `op` wins; `url`+`query` without `op` is a per-item error. Batch defaults fill only options that apply to each item's engine (`OPTION_ENGINES`).
+
+The batch dedupe fingerprint includes engine, normalized query, and every execution option. After execution, repeated search-result URLs across items become `{"ref", "see_index", "rank"}` references (`dedupe_results`), counted in `deduped_result_count`; `deduped_count` is requests plus results.
 
 ### HTTP API Server
 
@@ -102,9 +111,12 @@ All endpoints except `/health` require `X-API-Key`. The key is loaded from `CCSE
 
 - `search`
 - `fetch`
+- `verify`
 - `batch`
 - `engines`
 - `diagnostics`
+
+Tool descriptions and server instructions document engine selection, batch dispatch rules with an example, and defaults. Keep them synchronized with README and both skill files.
 
 Keep the MCP server thin and forward into shared execution logic.
 
@@ -229,6 +241,7 @@ Also run checks proportional to the changed surface:
 - MCP: exercise the affected tool and at least one real SSE or Streamable HTTP initialization when transport/auth code changes.
 - Fetch: test direct HTML extraction and, when relevant, the running FlareSolverr fallback.
 - Fetch results containing `error` are failures even when transport metadata is present. Preserve ordinary HTTP errors, verify binary conversion with a real document, and reject empty browser-rendered content.
+- Fetch fallback: check `served_from` and `attempts` on a Cloudflare-protected page, a Discourse topic (for example linux.do), and a 404 page (must not fall back).
 - Deployment: check systemd state, listeners, redacted recent logs, Docker state, and public Cloudflare routes.
 
 ## Documentation Sync Rules
@@ -249,4 +262,4 @@ Also run checks proportional to the changed surface:
 - Empty authentication files fail closed; concurrent first starts atomically publish one complete 0600 key. Existing unreadable configuration fails explicitly.
 - Missing provider answers/error envelopes fail rather than becoming successful empty responses. `both` keeps partial output but sets top-level `error` if both engines fail.
 - Fetch fallback is limited to expected transport/browser errors, not programming exceptions. Unresolved challenges and empty document conversions fail. MarkItDown uses its single file conversion API; MIME types take precedence over dynamic URL suffixes.
-- Review regression suites are `test_review_*.py`; use `python3 -m unittest discover -v` to include them along with the original suite. Do not globally clear inherited provider credentials. Key-selection and missing-key tests use explicit fixtures; the loopback MCP server keeps its disposable authentication key.
+- Review regression suites are `test_review_*.py`, and the agent-improvement suite is `test_agent_improvements.py`; use `python3 -m unittest discover -v` to include them along with the original suite. Do not globally clear inherited provider credentials. Key-selection and missing-key tests use explicit fixtures; the loopback MCP server keeps its disposable authentication key.

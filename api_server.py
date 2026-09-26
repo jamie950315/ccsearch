@@ -19,6 +19,7 @@ from ccsearch import (
     execute_query,
     get_diagnostics,
     list_engines,
+    normalize_claims,
     validate_query,
     validate_execution_options,
     VALID_ENGINES,
@@ -65,14 +66,23 @@ def search():
 
     JSON body:
       - query (str, required): search query or URL (for fetch engine)
-      - engine (str, required): brave | perplexity | both | fetch | llm-context
+      - engine (str, required): brave | perplexity | both | fetch | llm-context | perplexity-verify
+      - claims (list[str], perplexity-verify): claims to check instead of a newline-separated query
       - cache (bool, optional): enable caching (default: false)
       - cache_ttl (int, optional): cache TTL in minutes (default/max: 129600, 90 days)
+      - max_cache_age (int, optional): ignore cache entries older than this many minutes
       - semantic_cache (bool, optional): enable semantic cache (default: false)
       - semantic_threshold (float, optional): cosine similarity threshold (default: 0.9)
-      - offset (int, optional): pagination offset (brave only)
-      - result_limit (int, optional): trim returned results for brave/both/llm-context
+      - offset (int, optional): pagination offset (brave/both)
+      - result_limit (int, optional): results for brave/both/llm-context (default: 8)
+      - freshness, country, search_lang (str, optional): Brave filters for brave/both/llm-context
+      - snippet_limit (int, optional): snippets per llm-context result (default: 5)
       - flaresolverr (bool, optional): force FlareSolverr for fetch engine
+      - format (str, fetch): text (default, content only) or chunks (chunks only)
+      - focus (str, fetch) / focus_k (int, default 5): return only the most relevant passages
+      - max_chars (int, fetch): truncate content and report truncated/total_chars
+      - max_replies (int, fetch): forum replies for Discourse/Reddit/V2EX (default: 30)
+      - verbose (bool, optional): include hashes, offsets, section paths, outbound links, raw ages
       - include_hosts (list[str] or comma-separated str, optional): host allow-list for brave/both/llm-context
       - exclude_hosts (list[str] or comma-separated str, optional): host deny-list for brave/both/llm-context
     """
@@ -82,10 +92,17 @@ def search():
 
     query = data.get("query", "")
     engine = data.get("engine", "")
-    if not isinstance(query, str) or not isinstance(engine, str):
+    if not isinstance(engine, str):
+        return jsonify({"error": "Bad Request", "message": "'query' and 'engine' must be strings"}), 400
+    engine = engine.strip().lower()
+    if engine == "perplexity-verify" and data.get("claims") is not None:
+        try:
+            query = "\n".join(normalize_claims(data.get("claims")))
+        except ValueError as e:
+            return jsonify({"error": "Bad Request", "message": str(e)}), 400
+    if not isinstance(query, str):
         return jsonify({"error": "Bad Request", "message": "'query' and 'engine' must be strings"}), 400
     query = query.strip()
-    engine = engine.strip().lower()
 
     if not query:
         return jsonify({"error": "Bad Request", "message": "'query' is required"}), 400
@@ -105,6 +122,13 @@ def search():
     force_flaresolverr = data.get("flaresolverr", False)
     include_hosts = data.get("include_hosts")
     exclude_hosts = data.get("exclude_hosts")
+    # Newer options are forwarded only when present so older clients see no change.
+    extra_options = {
+        name: data[name]
+        for name in ("max_cache_age", "freshness", "country", "search_lang", "snippet_limit",
+                     "format", "verbose", "focus", "focus_k", "max_chars", "max_replies")
+        if name in data and data[name] is not None
+    }
 
     config = load_config(CONFIG_PATH)
 
@@ -123,6 +147,7 @@ def search():
         result_limit=result_limit,
         cache=use_cache,
         semantic_cache=use_semantic,
+        **extra_options,
     )
     if option_error:
         return jsonify({"error": "Bad Request", "message": option_error}), 400
@@ -141,6 +166,7 @@ def search():
             include_hosts=include_hosts,
             exclude_hosts=exclude_hosts,
             result_limit=result_limit,
+            **extra_options,
         )
         if isinstance(result, dict) and result.get("error"):
             return jsonify(result), 424 if engine == "fetch" else 500
@@ -159,7 +185,12 @@ def search():
 @app.route("/batch", methods=["POST"])
 @require_api_key
 def batch():
-    """Execute multiple requests in one HTTP round-trip."""
+    """Execute multiple requests in one HTTP round-trip.
+
+    Items with ``url`` are fetched; items with ``query`` are searched with
+    ``engine`` (default brave); ``op`` ("search" or "fetch") overrides the
+    inference. ``defaults.engine`` applies to search items only.
+    """
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "Bad Request", "message": "JSON object body required"}), 400
@@ -167,10 +198,11 @@ def batch():
     requests_payload = data.get("requests")
     defaults = data.get("defaults", {})
     max_workers = data.get("max_workers")
+    dedupe_results = data.get("dedupe_results", True)
     config = load_config(CONFIG_PATH)
 
     try:
-        result = execute_batch(requests_payload, config, defaults=defaults, max_workers=max_workers)
+        result = execute_batch(requests_payload, config, defaults=defaults, max_workers=max_workers, dedupe_results=dedupe_results)
         return jsonify(result)
     except ValueError as e:
         return jsonify({"error": "Bad Request", "message": str(e)}), 400
@@ -192,7 +224,7 @@ def engines():
 def diagnostics():
     """Return runtime diagnostics without exposing secret values."""
     config = load_config(CONFIG_PATH)
-    return jsonify(get_diagnostics(config))
+    return jsonify(get_diagnostics(config, include_quota=True))
 
 
 # ---------------------------------------------------------------------------

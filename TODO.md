@@ -35,8 +35,8 @@ Future work for `ccsearch`. These items are intentionally focused on high-value 
 ## API / MCP / CLI
 
 - Audit external integration templates for `/batch` and `/diagnostics`; both checked-in skill files already include first-class examples.
-- Consider adding a dedicated `result_format` or `compact` mode for lighter agent payloads.
-- Consider exposing an explicit chunk-focused fetch mode for agent workflows that do not need the full `content` body.
+- Consider embedding-based `focus` ranking when fastembed is available (current ranking is lexical BM25).
+- Consider extracting page dates from visible text (for example "Updated on ...") when metadata is missing.
 
 ## Operations
 

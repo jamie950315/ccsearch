@@ -7,11 +7,24 @@ A CLI Web Search utility designed to be easily used by Large Language Models (LL
 2. **Perplexity** (via OpenRouter): Best for getting an intelligent, synthesized answer using online sources. Supports model selection, customizable temperature, and citation formatting.
 3. **LLM Context** (via Brave LLM Context API): Returns pre-extracted, relevance-scored web content (smart chunks) optimized for LLM consumption. Extracts text, tables, code blocks, and structured data from multiple sources in a single API call — no scraping needed. Ideal for RAG pipelines and AI agent grounding.
 4. **Both** (Concurrency): Runs both Brave and Perplexity searches in parallel, returning a merged outcome (a synthesized answer alongside raw source links).
-5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected pages and **SPA shell detection** that identifies JS-heavy pages (empty mount points, script-heavy HTML with little text) and auto-falls back to headless rendering. HTML extraction now prefers `main` / `article` / `role="main"` content when present to reduce layout noise. Non-HTML text responses are decoded directly, and supported binary documents (`PDF`, `DOCX`, `PPTX`, `XLSX`, etc.) can be converted to Markdown via optional **MarkItDown** integration. **Twitter/X URLs** are automatically intercepted and routed through the [fxtwitter API](https://github.com/FixTweet/FixTweet) to retrieve tweet content, author info, and engagement metrics without login.
+5. **Fetch**: A built-in web scraper that downloads a given URL, parses it, and returns the cleaned text without HTML tags. Perfect for reading full articles when a snippet isn't enough. Uses **curl_cffi** for Chrome TLS fingerprint impersonation to access strict anti-bot sites (Facebook, LinkedIn, Medium, etc.), with full Chrome 146 headers and a Google Referer. Includes automatic **FlareSolverr** fallback for Cloudflare-protected pages and **SPA shell detection** that identifies JS-heavy pages (empty mount points, script-heavy HTML with little text) and auto-falls back to headless rendering. HTML extraction now prefers `main` / `article` / `role="main"` content when present to reduce layout noise. Non-HTML text responses are decoded directly, and supported binary documents (`PDF`, `DOCX`, `PPTX`, `XLSX`, etc.) can be converted to Markdown via optional **MarkItDown** integration. **Twitter/X URLs** are automatically intercepted and routed through the [fxtwitter API](https://github.com/FixTweet/FixTweet) to retrieve tweet content, author info, and engagement metrics without login. Forum threads on Discourse (for example `linux.do`), Reddit, and V2EX are read through their JSON APIs with a structured `replies` list. Pages that stay blocked fall back to Brave LLM Context passages for the same URL and then to the newest Wayback Machine snapshot (see [Fetch fallback chain](#fetch-fallback-chain)).
+6. **Perplexity Verify** (`perplexity-verify`): Checks up to 10 claims one by one and returns `supported`, `contradicted`, or `not_found` for each, with sources mapped onto the real citation URLs Perplexity returned so they can be re-opened with `fetch`.
+
+### Which engine to use
+
+| Engine | Use it for |
+|--------|------------|
+| `brave` | Finding links and short summaries. Start research here. |
+| `llm-context` | Reading long documents as pre-extracted passages, or getting content when the original site blocks `fetch`. |
+| `fetch` | Reading the original page. |
+| `perplexity` | Final cross-checking only; do not use it as the primary source. |
+| `perplexity-verify` | Checking a short list of conclusions claim by claim. |
 
 Search-style engines also normalize their output for downstream agents:
-- Brave results include `hostname`, strip inline HTML tags, decode HTML entities, and deduplicate repeated URLs.
-- LLM Context results include `hostname` and `age` when available, cleaned snippet chunks, and any unique short `snippet` from Brave. The duplicate top-level `sources` catalog is omitted.
+- Brave results include `hostname`, strip inline HTML tags, decode HTML entities, and deduplicate repeated URLs. They return the top **8** results by default (`result_limit` overrides this).
+- Every `brave`, `both`, and `llm-context` result has a single `published_at` date (`YYYY-MM-DD`, or `null` when unknown). With `freshness`, results dated before the window are removed and reported in `freshness_filtering`.
+- LLM Context results include `hostname`, `published_at`, cleaned snippet chunks, and any unique short `snippet` from Brave. By default they return at most 8 results with at most 5 snippets each (`result_limit` / `snippet_limit` override this). The raw, mixed-format `age` list is returned only with `verbose`. The duplicate top-level `sources` catalog is omitted.
+- Text addressed to AI readers (for example `[CRITICAL INSTRUCTIONS FOR ALL AI ASSISTANTS ...]` blocks, "ignore previous instructions", and linux.do's fixed anti-AI notice) is removed from titles, descriptions, snippets, fetched content, and forum replies. Each removal is reported in the item's `injection_suspected` list with the original `text`, its `field`, character `start`, and the matching `rule`.
 - Perplexity responses preserve normalized `citations` when the upstream model returns them.
 - `both` preserves partial-failure visibility through `brave_error` or `perplexity_error` fields when one backend fails, and forwards `perplexity_citations` when available.
 - Search results also carry stable positional metadata such as `rank`, `result_count`, and `brave_result_count` where relevant.
@@ -83,6 +96,18 @@ ccsearch "https://x.com/jack/status/20" -e fetch --format text
 # Fetch a Twitter/X user profile
 ccsearch "https://x.com/NASA" -e fetch --format text
 
+# Only results from the past month, from Taiwan, in Traditional Chinese
+ccsearch "Cursor pricing" -e brave --freshness pm --country TW --search-lang zh-hant --format json
+
+# Read only the passages about one topic, capped at 4,000 characters
+ccsearch "https://flexprice.io/blog/cursor-pricing-guide" -e fetch --focus "Pro Plus included usage" --max-chars 4000 --format json
+
+# Read a forum thread (Discourse, Reddit, V2EX) with up to 10 replies
+ccsearch "https://linux.do/t/topic/2911949" -e fetch --max-replies 10 --format json
+
+# Verify conclusions claim by claim
+ccsearch -e perplexity-verify --claim "Cursor Pro Plus includes \$70 of third-party usage" --claim "Cursor Pro costs \$20 per month" --format json
+
 # Run a mixed batch from JSON/JSONL with bounded concurrency
 ccsearch --batch-file requests.json --batch-workers 4 --format json
 
@@ -110,7 +135,7 @@ ccsearch "React 19 release date" -e perplexity --cache
 # Cache the result for a custom duration (e.g., 60 minutes)
 ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
-*Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)`.* The default and maximum readable age is 90 days (`129600` minutes). A smaller `--cache-ttl` shortens the freshness window. Beginning on day 91, result files are deleted by the hourly maintenance timer or the next cache cleanup pass. Run `ccsearch --prune-cache --format json` to enforce retention immediately.
+*Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)` plus any request options that change upstream results (`freshness`, `country`, `search_lang`, and a non-default `max_replies`).* Cache hits return `cached_at` (UTC ISO 8601) with `cache_status`; `--max-cache-age` (`max_cache_age` in the API/MCP, in minutes) ignores entries older than that age and fetches fresh data. The default and maximum readable age is 90 days (`129600` minutes). A smaller `--cache-ttl` shortens the freshness window. Beginning on day 91, result files are deleted by the hourly maintenance timer or the next cache cleanup pass. Run `ccsearch --prune-cache --format json` to enforce retention immediately.
 
 For the `fetch` engine, URLs are normalized before hashing so cache hits survive:
 
@@ -152,7 +177,8 @@ ccsearch "Python asyncio tutorial" -e brave --semantic-cache --semantic-threshol
 5. `--semantic-cache` implies `--cache` — no need to pass both flags
 
 **Notes:**
-- Applies to `brave`, `perplexity`, `both`, and `llm-context` engines. The `fetch` engine always uses exact URL matching.
+- Semantic cache is **off by default** and should stay off for time-sensitive research. Candidates must contain exactly the same numbers as the new query, so "Opus 5.5 pricing" never reuses "Opus 5 pricing", and they must share the same `freshness`/`country`/`search_lang` options.
+- Applies to `brave`, `perplexity`, `both`, and `llm-context` engines. The `fetch` and `perplexity-verify` engines always use exact matching.
 - If `fastembed` is not installed, a warning is printed and the tool continues without semantic matching.
 - The same `--cache-ttl` applies to both caches. It cannot exceed 90 days, and semantic-index entries are removed when their result files are deleted.
 
@@ -200,20 +226,33 @@ Main search endpoint. Accepts a JSON body with the following fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `query` | string | Yes | Search query or URL (for fetch engine) |
-| `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, or `llm-context` |
+| `query` | string | Yes | Search query, URL (for fetch engine), or newline-separated claims (for `perplexity-verify`) |
+| `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, `llm-context`, or `perplexity-verify` |
+| `claims` | list | No | Claims for `perplexity-verify` (up to 10), instead of `query` |
 | `cache` | bool | No | Enable result caching (default: `false`) |
 | `cache_ttl` | int | No | Cache freshness in minutes (default/max: `129600`, or 90 days) |
+| `max_cache_age` | int | No | Ignore cache entries older than this many minutes |
 | `semantic_cache` | bool | No | Enable semantic similarity cache (default: `false`) |
 | `semantic_threshold` | float | No | Cosine similarity threshold (default: `0.9`) |
 | `offset` | int | No | Pagination offset (`brave` and `both` only) |
-| `result_limit` | int | No | Trim returned results for `brave`, `both`, and `llm-context` |
+| `result_limit` | int | No | Results returned for `brave`, `both`, and `llm-context` (default: `8`) |
+| `freshness` | string | No | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` for `brave`, `both`, `llm-context` |
+| `country` | string | No | Two-letter country code (for example `US`, `TW`) or `ALL` |
+| `search_lang` | string | No | Search language code (for example `en`, `ja`, `zh-hant`) |
+| `snippet_limit` | int | No | Snippets per `llm-context` result (default: `5`) |
 | `flaresolverr` | bool | No | Force FlareSolverr for fetch engine (default: `false`) |
+| `format` | string | No | Fetch body: `text` (default, `content` only) or `chunks` (`chunks` only) |
+| `focus` | string | No | Fetch only the passages most relevant to this topic |
+| `focus_k` | int | No | Number of focus passages (default: `5`) |
+| `max_chars` | int | No | Truncate fetched content; adds `truncated: true` and `total_chars` |
+| `max_replies` | int | No | Forum replies for Discourse/Reddit/V2EX threads (default: `30`) |
+| `verbose` | bool | No | Include hashes, offsets, section paths, outbound links, transport headers, and raw ages |
 | `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, and `llm-context` |
 | `exclude_hosts` | list/string | No | Host deny-list for `brave`, `both`, and `llm-context` |
 
 All single-query responses now include:
 - `cache_status`: one of `disabled`, `exact`, `semantic`, or `miss`
+- `cached_at`: when the served cache entry was written (UTC), or `null` for live results
 - `duration_ms`: end-to-end execution time for the request
 
 Search-style engines also expose lightweight source-host summaries:
@@ -227,38 +266,28 @@ For `brave`, `both`, and `llm-context`, you can also apply host filters at reque
 - `host_filtering`: response metadata showing the normalized filters that were applied and how many results were removed
 - `result_limit`: trim the remaining result list to a stable top-N after filtering, with `result_limiting` metadata describing the applied limit and removed count
 
-For `fetch` responses, the JSON payload now includes transport metadata such as:
-- `final_url`: final URL after redirects
-- `status_code`: HTTP status code when available
-- `content_type`: normalized MIME type without the charset suffix
-- `content_length`: response payload size in bytes when available
-- `etag`: HTTP `ETag` response header when available
-- `last_modified`: HTTP `Last-Modified` response header when available
-- `filename`: inferred filename from `Content-Disposition` or URL path when available
-- `converted_via`: present when a binary document was converted (for example, `markitdown`)
-- `content_sha256`: stable hash of the extracted text body for downstream deduplication
-- `content_word_count`: total extracted word count
-- `chunks`: structured content blocks extracted from the response body, useful for downstream summarization or reranking
-  - Each chunk keeps `index`, `type`, and `text`, and also includes lightweight metadata such as `section_title`, `section_path`, `section_path_text`, `section_depth`, `char_count`, `word_count`, `relative_position`, `char_start`, `char_end`, `text_sha256`, and `chunk_id`
-  - Link-bearing chunks also expose `link_count`, `internal_link_count`, and `external_link_count`
-  - Some chunk types also expose structure-specific metadata:
-    - lists: `list_item_count`, `list_ordered`
-    - tables: `table_row_count`, `table_column_count`, `table_headers`
-    - code: `code_language`, `code_line_count`
-- `chunk_count`: total number of structured chunks
-- `outbound_links`: deduplicated page-level HTTP/HTTPS links with anchor text, source chunk index, hostname, and same-host classification
-- `error`: present when the HTTP response failed, document conversion failed, or browser rendering produced no extractable content; callers must treat this as a failed fetch even when transport metadata is present
-- `outbound_link_count`: total unique outbound link count across all chunks
-- `internal_outbound_link_count`: same-host outbound links
-- `external_outbound_link_count`: off-site outbound links
-- `outbound_hosts`: unique hostnames referenced by the extracted outbound links
+For `fetch` responses, the default JSON payload is compact:
+- `content`: the extracted main text. Chunks are **not** returned by default, so the body is not duplicated. With `format: "chunks"`, only `chunks` is returned (no `content`).
+- `ok`: `true` when content was extracted; `false` together with `error` otherwise. Callers must treat any `error` as a failed fetch even when transport metadata is present.
+- `served_from`: `direct`, `flaresolverr`, `site-api`, `llm-context`, or `archive` (`null` on failure)
+- `attempts`: every step tried, in order, as `{"method", "status", "ms"}` plus `http_status`, `site`, or `detail` when relevant. Statuses include `ok`, `cf_challenge`, `http_error`, `transport_error`, `empty`, `spa_shell`, `no_match`, `no_snapshot`, `unavailable`, and `error`.
+- `fetched_at`: when the page was retrieved (UTC); `content_date`: the page's own date (`published_at`, else modified time or `Last-Modified`) as `YYYY-MM-DD`
+- `snapshot_date`: Wayback snapshot time when `served_from` is `archive`; `content_scope: "excerpts"` when `served_from` is `llm-context`
+- `title`, `status_code`, `content_type`, `final_url` (only when it differs from `url`), `converted_via` for converted documents
+- Forum threads add `replies` (`author`, `created_at`, `content`, and `post_number`/`score`/`depth` where the site provides them), `reply_count`, `returned_reply_count`, and `forum` (`platform`, topic id)
+- `focus` metadata and a focused `content` when `focus` is set; `truncated` and `total_chars` when `max_chars` cut the content
+- `injection_suspected` when AI-directed text was removed
+
+With `verbose: true`, fetch results also include `content_sha256`, `content_word_count`, `content_length`, `etag`, `last_modified`, `filename`, `hostname`, `fetched_via`, `outbound_links` with their counts and hosts, and full chunk metadata (`chunk_id`, `char_start`, `char_end`, `relative_position`, `section_path`, `text_sha256`, link counts, and list/table/code counts). Compact chunks keep `index`, `type`, `text`, `section_title`, and small structural hints such as `heading_level`, `code_language`, `list_ordered`, and `table_headers`.
+
+HTML extraction removes documentation chrome before choosing the main text: a single `<main>`/`role="main"` or `<article>` landmark wins over longer navigation sidebars, and side navigation, tables of contents, breadcrumbs, pagers, author boxes, and call-to-action blocks marked by whole class/id tokens are pruned. Repeated responsive-layout headings are merged and "Previous/Next post" links are dropped.
 
 For HTML pages, `fetch` also extracts page metadata when available:
-- `canonical_url`: canonical URL from the page's `<link rel="canonical">`
 - `lang`: page language from the root HTML tag
 - `description`: page summary from standard or Open Graph meta tags
 - `author`: author metadata from common article meta tags
-- `published_at`: publish timestamp from common article meta tags
+- `published_at`: publish date from common article meta tags, normalized to `YYYY-MM-DD`
+- `canonical_url`: canonical URL from `<link rel="canonical">` when it differs from the requested URL
 
 When those HTML meta tags are missing, ccsearch also falls back to JSON-LD article schemas and prunes common non-content UI blocks such as cookie banners and newsletter popups before extracting the main text.
 It also sniffs mislabeled HTML payloads (for example, pages served as `application/octet-stream`) so SPA fallback and metadata extraction still work on poorly configured sites.
@@ -296,29 +325,42 @@ Execute multiple search and fetch requests in a single round-trip.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `requests` | array | Yes | List of request objects. Each entry may provide `query` or `url`, plus any per-request engine options |
-| `defaults` | object | No | Default options merged into each entry (for example `engine`, `cache`, `cache_ttl`, `result_limit`, `include_hosts`, `exclude_hosts`) |
+| `requests` | array | Yes | List of request objects (see the dispatch rules below), plus any per-request options |
+| `defaults` | object | No | Default options applied to each entry where they apply (for example `engine`, `cache`, `result_limit`, `freshness`, `focus`, `max_chars`) |
 | `max_workers` | int | No | Maximum concurrent worker threads (defaults to `[Batch].max_workers`) |
+| `dedupe_results` | bool | No | Replace repeated search-result URLs with references (default: `true`) |
+
+Dispatch rules for each request:
+- An entry with `url` is fetched (engine `fetch`).
+- An entry with `query` is searched with its own `engine`, else `defaults.engine`, else `brave`.
+- `op: "search"` or `op: "fetch"` overrides the inference.
+- An entry with both `url` and `query` and no `op`, or with neither, fails on its own; the other entries still run.
+- `defaults.engine` applies to search entries only; it never changes a `url` entry. (For compatibility, a `query` entry whose engine resolves to `fetch` is still fetched.)
+- `{"engine": "perplexity-verify", "claims": [...]}` verifies claims.
+- Defaults fill only the options that apply to each entry's engine (search options for searches, `format`/`focus`/`max_chars`/`max_replies`/`flaresolverr` for fetches). Options set explicitly on an entry are validated strictly.
+- Every result reports the `engine` it actually used.
 
 The response includes:
 - `results`: per-request results in original order
 - `count`, `success_count`, `error_count`, `has_errors`
 - `duration_ms`: total batch runtime
 - `max_workers`: effective concurrency used
-- `deduped_count`: how many repeated requests were reused instead of executed again
+- `deduped_count`: `deduped_request_count` + `deduped_result_count`
+- `deduped_request_count`: identical requests reused instead of executed again (marked with `_batch_deduped` and `_batch_deduped_from`)
+- `deduped_result_count`: search results whose URL already appeared in an earlier entry; they are replaced by `{"ref": "<url>", "see_index": n, "rank": r}` pointing at the first entry that returned it. Brave-style results (`brave`, `both`) and `llm-context` results are deduplicated separately because their payloads differ.
 - `engine_counts`: request count by engine
-- Repeated identical requests inside the same batch are deduplicated automatically and reused in-place, with duplicate entries marked by `_batch_deduped` and `_batch_deduped_from`
 
 ```bash
 curl -X POST https://ccsearch.0ruka.dev/batch \
   -H "Content-Type: application/json" \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
-        "max_workers": 4,
-        "defaults": {"cache": true, "cache_ttl": 30},
+        "defaults": {"freshness": "pm", "max_chars": 4000},
         "requests": [
-          {"query": "React compiler release", "engine": "brave"},
-          {"query": "https://react.dev/blog", "engine": "fetch"}
+          {"query": "Cursor pricing 2026"},
+          {"query": "Cursor Pro Plus usage", "engine": "llm-context"},
+          {"url": "https://cursor.com/docs/models-and-pricing", "focus": "Pro Plus included usage"},
+          {"url": "https://linux.do/t/topic/2911949", "max_replies": 10}
         ]
       }'
 ```
@@ -331,8 +373,10 @@ curl https://ccsearch.0ruka.dev/engines \
 ```
 
 Each engine entry includes:
-- `name`, `description`, `requires`
-- `category` (`search`, `answer`, `context`, `hybrid`, or `fetch`)
+- `name`, `description`, `use_for`, `requires`
+- `category` (`search`, `answer`, `context`, `hybrid`, `fetch`, or `verify`)
+- defaults where relevant: `default_result_limit`, `default_snippet_limit`, `default_format`, `default_focus_k`, `default_max_replies`, `max_claims`
+- `supports_search_options` (`freshness`, `country`, `search_lang`)
 - `supports_offset`
 - `supports_semantic_cache`
 - `supports_flaresolverr`
@@ -356,8 +400,10 @@ The response includes:
 - dependency availability (`curl_cffi`, `fastembed`, `markitdown`, `mcp`)
 - environment-key presence as booleans
 - Brave key rotation state such as `key_count`, `round_robin`, per-key RPS, and `combined_cap_rps` (no secret values)
-- fetch runtime state such as `flaresolverr_configured` and `flaresolverr_mode`
+- fetch runtime state such as `flaresolverr_configured`, `flaresolverr_mode`, and `extended_fallbacks`
 - batch runtime defaults such as `max_workers`
+- `quota.brave.keys[]`: for each configured key (by position and non-secret fingerprint), the rate-limit windows from the most recent Brave response (`window_seconds`, `limit`, `remaining`, `reset_seconds`, `unlimited`) and when they were observed. The limiter cannot see traffic from other hosts, so these numbers come from Brave's own headers.
+- `quota.openrouter`: live OpenRouter key usage (`usage`, `limit`, `limit_remaining`, `rate_limit`), cached for 60 seconds
 - the current engine list
 
 ### Deployment
@@ -395,14 +441,14 @@ ccsearch.py (core search logic, shared)
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `search` | Web search via brave/perplexity/both/llm-context engines | `query`, `engine`, `offset`, `result_limit`, `cache`, `cache_ttl`, `semantic_cache`, `semantic_threshold`, `include_hosts`, `exclude_hosts` |
-| `fetch` | Fetch and extract text from a URL | `url`, `flaresolverr`, `cache`, `cache_ttl` |
-| `batch` | Execute multiple search/fetch requests in one call | `requests`, optional shared defaults, `max_workers` |
-| `engines` | List available engines and their capabilities | none |
-| `diagnostics` | Return dependency and runtime diagnostics | none |
+| `search` | Web search via brave/perplexity/both/llm-context engines | `query`, `engine`, `offset`, `result_limit`, `freshness`, `country`, `search_lang`, `snippet_limit`, `include_hosts`, `exclude_hosts`, `verbose`, `cache`, `cache_ttl`, `max_cache_age`, `semantic_cache`, `semantic_threshold` |
+| `fetch` | Fetch a URL through the fallback chain | `url`, `format`, `focus`, `focus_k`, `max_chars`, `max_replies`, `verbose`, `flaresolverr`, `cache`, `cache_ttl`, `max_cache_age` |
+| `verify` | Check claims one by one with Perplexity | `claims`, `verbose`, `cache`, `cache_ttl`, `max_cache_age` |
+| `batch` | Execute multiple search/fetch requests in one call | `requests`, shared defaults for every option above, `max_workers`, `dedupe_results` |
+| `engines` | List available engines, what each is for, and their defaults | none |
+| `diagnostics` | Return dependency, runtime, and quota diagnostics | none |
 
-`fetch` returns the same metadata fields as the HTTP API (`final_url`, `status_code`, `content_type`, `content_length`, optional `filename`, optional `converted_via`, `chunks`, and HTML metadata such as `canonical_url`, `lang`, `description`, `author`, and `published_at` when present).
-Chunk metadata also includes section hierarchy fields (`section_path`, `section_path_text`, `section_depth`) for more precise citation and reranking workflows.
+The MCP server instructions and every tool description state which engine to use for what, the batch dispatch rules with an example, and the defaults (`result_limit` 8, `snippet_limit` 5, `format` text, `focus_k` 5, `max_replies` 30, and when FlareSolverr is used). `fetch` returns the same fields as the HTTP API.
 
 ### Authentication
 
@@ -497,9 +543,21 @@ ccsearch "https://cloudflare-site.com" -e fetch --format json --flaresolverr
 
 ### Detection
 The tool automatically detects Cloudflare challenges by checking for:
-- `"Just a moment..."` in the page title
-- `"Checking your browser"`, `"cf-browser-verification"`, or `"challenge-platform"` in the response body
-- Suspiciously short responses (< 1KB) with a `cf-ray` header
+- `"Just a moment..."` in the page title, a `cf-mitigated: challenge` header, or the `_cf_chl_opt` challenge script
+- `"Checking your browser"` or `"cf-browser-verification"` in the response body
+- `"challenge-platform"` only on error responses or pages with almost no visible text. Normal Cloudflare-hosted pages (for example `openai.com` and `linux.do`) load `/cdn-cgi/challenge-platform` beacon scripts and are no longer mistaken for challenges.
+
+### Fetch fallback chain
+
+Each step runs only when the previous one did not produce content:
+
+1. **Site API** — only for recognized URLs: X/Twitter (fxtwitter), Discourse topics (`/t/{id}.json`, then `/raw/{id}`), Reddit threads (`.json` on `www.reddit.com`, then `old.reddit.com`), and V2EX topics (`/api/topics/show.json` and `/api/replies/show.json`). Blocked JSON APIs are retried through FlareSolverr when it is configured.
+2. **Direct** fetch with curl_cffi.
+3. **FlareSolverr** for Cloudflare challenges, SPA shells, and network failures (`flaresolverr_mode`).
+4. **LLM Context** — a Brave LLM Context query restricted to the page's host (`site:host` plus the page title or URL slug). Only passages whose URL matches the requested page are used; results are marked `content_scope: "excerpts"`.
+5. **Archive** — the newest successful Wayback Machine snapshot, with `snapshot_date`.
+
+Steps 4 and 5 run only when the page was blocked or unreachable (challenge, 401/403/429/451/5xx, network failure, empty or SPA-shell content). A 404 or 410 is reported as-is, never replaced with another page. `[Fetch] extended_fallbacks` controls steps 4 and 5. Every response lists all steps in `attempts`.
 
 ## Advanced Configuration (`config.ini`)
 
@@ -531,6 +589,7 @@ You can deeply customize tool behavior by adjusting `config.ini`:
 - **`flaresolverr_url`**: FlareSolverr endpoint URL (e.g., `http://localhost:8191/v1`). Leave blank to disable.
 - **`flaresolverr_timeout`**: Max time in milliseconds for FlareSolverr to solve a challenge (Default: `60000`).
 - **`flaresolverr_mode`**: Strategy: `fallback`, `always`, or `never` (Default: `fallback`).
+- **`extended_fallbacks`**: Comma-separated fallbacks after direct/FlareSolverr fail on a blocked page: `llm-context`, `archive`, or `none` (Default: `llm-context, archive`). The LLM Context step uses a Brave key and counts against its rate limit.
 
 ### `[Batch]`
 - **`max_workers`**: Maximum worker threads for batch execution (Default: `4`).
@@ -542,6 +601,12 @@ You can deeply customize tool behavior by adjusting `config.ini`:
 ## 🤖 Guide for LLMs & AI Agents
 
 If you are an AI assistant (like Claude, Cursor, or ChatGPT) reading this, you can use this tool to browse the internet to answer user queries!
+
+### Recommended research flow
+1. **Search**: batch 2–3 differently worded `brave` queries (`result_limit` 8 is the default); add `freshness: "pm"` for time-sensitive topics.
+2. **Read**: batch-fetch 3–5 pages with `focus` and `max_chars`. Blocked sites go through the fallback chain automatically; check `served_from`.
+3. **Long documents**: use `llm-context` when you need the whole document's relevant passages.
+4. **Verify**: run `perplexity-verify` on 3–5 key conclusions. For any `contradicted` claim, fetch its sources to confirm.
 
 ### Features Built for Agents
 - **JSON First**: Use `--format json` to get machine-readable structures.
@@ -558,7 +623,7 @@ ccsearch "anthropic claude 3.5 sonnet release date" -e brave --format json
 ```
 *Use this when you need to research specific websites, gather URLs, or need diverse sources.*
 
-*(Agent Tip: If you didn't find what you need in the first 10 results, you can fetch the next page by adding `--offset 1`)*
+*(Agent Tip: results default to the top 8; use `--limit 20` for more, `--offset 1` for the next page, and `--freshness pm` to drop results older than a month.)*
 
 **LLM Context Example:**
 ```bash
@@ -588,7 +653,7 @@ ccsearch "https://example.com/report.pdf" -e fetch --format json
 ```bash
 ccsearch "https://cloudflare-protected-site.com" -e fetch --format json --flaresolverr
 ```
-*Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. The JSON output includes a `"fetched_via"` field (`"direct"` or `"flaresolverr"`) and preserves the rendered response's final URL, status, and content type. Empty rendered pages return an `error` directing callers to an interactive browser.*
+*Use this when a normal fetch fails due to Cloudflare protection. Requires FlareSolverr configured in `config.ini`. You rarely need it: the default fallback chain already renders challenge pages and then tries LLM Context and the Wayback Machine. The JSON output includes `served_from` and `attempts`, and preserves the rendered response's final URL, status, and content type. Empty rendered pages return an `error` directing callers to an interactive browser.*
 
 **Semantic Cache Example:**
 ```bash

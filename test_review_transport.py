@@ -92,7 +92,7 @@ class TestLocalMcpTransport(unittest.TestCase):
                 initialized = await session.initialize()
                 self.assertEqual(initialized.serverInfo.name, "ccsearch")
                 listed = await session.list_tools()
-                self.assertEqual({tool.name for tool in listed.tools}, {"search", "fetch", "batch", "engines", "diagnostics"})
+                self.assertEqual({tool.name for tool in listed.tools}, {"search", "fetch", "verify", "batch", "engines", "diagnostics"})
                 good = await session.call_tool("engines", {})
                 self.assertFalse(good.isError)
                 invalid = await session.call_tool("search", {"query": ""})
