@@ -501,7 +501,7 @@ async with streamablehttp_client("https://ccsearch-mcp.0ruka.dev/<KEY>/mcp") as 
 ### Deployment
 
 - **Runtime**: Python 3 with `mcp>=1.26.0,<2` (FastMCP imports used by this project are not compatible with MCP 2.x)
-- **Verified 2026-09-08**: 480 tests pass on Mac and A1-JP; public search/fetch, browser extraction, exact/semantic cache, batch isolation, and both MCP transports pass. The API/MCP unit files have a pre-existing pending systemd reload, left unapplied by this code release; inspect host changes before reloading. MCP 1.26 emits an upstream Pydantic startup warning, but both transports work.
+- **Verified 2026-09-26**: 543 tests pass on Mac and A1-JP; public search, fetch fallback chain (site APIs, direct, FlareSolverr), focus extraction, claim verification, batch dispatch/dedupe, quota diagnostics, and both MCP transports (including `verify`) pass. The API/MCP unit files have a pre-existing pending systemd reload, left unapplied by this code release; inspect host changes before reloading. MCP 1.26 emits an upstream Pydantic startup warning, but both transports work.
 - **Port**: 8890 (configurable via `CCSEARCH_MCP_PORT` env var)
 - **Systemd service**: `ccsearch-mcp.service`
 - **Cloudflare Tunnel**: `ccsearch-mcp.0ruka.dev → localhost:8890`
