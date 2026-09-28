@@ -163,6 +163,8 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 
 ### Fetch a URL
 
+Akamai interstitials trigger the configured browser fallback. Unresolved Akamai challenges and denial pages fail even with HTTP 200; rendering does not guarantee access. LLM Context URL matching preserves topic IDs and page numbers, ignoring only known tracking parameters. Legacy cached wrong-page excerpts and Akamai denial pages are bypassed.
+
 ```bash
 curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
   -H "Content-Type: application/json" \

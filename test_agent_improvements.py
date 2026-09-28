@@ -168,6 +168,41 @@ class TestCrossRequestDedupe(unittest.TestCase):
 # R2/R13 fetch fallback chain
 # ---------------------------------------------------------------------------
 class TestFetchFallbackChain(unittest.TestCase):
+    def test_query_based_pages_require_matching_topic_and_page(self):
+        url="https://www.mobile01.com/topicdetail.php?f=496&p=3&t=7059939"
+        for other in ("https://www.mobile01.com/topicdetail.php?f=14&t=7302053",
+                      "https://www.mobile01.com/topicdetail.php?f=496&p=2&t=7059939"):
+            with self.subTest(other=other), patch("ccsearch._select_brave_api_key", return_value=("key", "key")), \
+                    patch("ccsearch.perform_llm_context_search", return_value={"results": [{"url": other, "snippets": ["wrong"]}]}) as search:
+                result, status, _=ccsearch._llm_context_fetch_fallback(url, make_config())
+                self.assertIsNone(result)
+                self.assertEqual(status, "no_match")
+                self.assertEqual(search.call_args.args[0], url)
+        self.assertEqual(ccsearch._url_match_key(url), ccsearch._url_match_key(
+            "https://mobile01.com/topicdetail.php?t=7059939&f=496&p=3&utm_source=test"))
+
+    def test_akamai_challenge_uses_browser_and_rejects_denial(self):
+        challenge=http_response('<div id="sec-if-cpt-container"><img class="scf-akamai-logo"></div>')
+        denied=http_response('<title>Access Denied</title><h1>Access Denied</h1>https://errors.edgesuite.net/example')
+        config=make_config(flaresolverr_url="http://fs/v1", extended_fallbacks="none")
+        with patch("ccsearch._simple_fetch", return_value=challenge), patch("ccsearch._flaresolverr_fetch", return_value=denied):
+            result=ccsearch.fetch_with_fallbacks("https://example.com/page", config)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["served_from"])
+        self.assertEqual([a["status"] for a in result["attempts"]], ["akamai_challenge", "akamai_challenge"])
+        with patch("ccsearch._simple_fetch", return_value=challenge), patch("ccsearch._flaresolverr_fetch", return_value=http_response(ARTICLE_PAGE)):
+            result=ccsearch.fetch_with_fallbacks("https://example.com/page", config)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["served_from"], "flaresolverr")
+        self.assertFalse(ccsearch._detect_akamai(http_response('<title>Article</title><p>Akamai Access Denied errors.edgesuite.net/ explained.</p>')))
+
+    def test_legacy_false_success_cache_is_bypassed(self):
+        url="https://example.com/topic?t=1"
+        for cached in ({"fetched_via": "llm-context", "final_url": "https://example.com/topic?t=2"},
+                       {"fetched_via": "flaresolverr", "title": "Access Denied", "content": "https://errors.edgesuite.net/example"}):
+            with patch("ccsearch.read_from_cache", return_value=cached):
+                self.assertIsNone(ccsearch._exact_cache_lookup(url, "fetch", None, 60, False))
+
     def test_cloudflare_block_is_served_from_llm_context(self):
         llm = {"results": [
             {"url": "https://example.com/other", "snippets": ["wrong page"]},

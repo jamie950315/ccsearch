@@ -172,11 +172,13 @@ def fetch(
 
     Fallback chain (automatic): site API for Discourse (e.g. linux.do), Reddit,
     V2EX, and X/Twitter -> direct fetch -> FlareSolverr headless browser when a
-    Cloudflare challenge, SPA shell, or network failure is detected -> Brave LLM
+    Cloudflare/Akamai challenge, SPA shell, or network failure is detected -> Brave LLM
     Context passages for this exact URL -> newest Wayback Machine snapshot.
     404/410 pages are reported, not replaced. Check served_from
     (direct | flaresolverr | site-api | llm-context | archive) and attempts.
     Archive results include snapshot_date; forum results include replies.
+    Unresolved Akamai challenges and denial pages fail even with HTTP 200.
+    Excerpt URL matching preserves topic IDs and page numbers.
 
     Args:
         url: The URL to fetch (http:// or https://)

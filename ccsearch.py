@@ -2816,6 +2816,15 @@ def _detect_cloudflare(response):
             return True
     return False
 
+def _detect_akamai(response):
+    """Recognize observed Akamai interstitials, not ordinary CDN scripts."""
+    soup=BeautifulSoup(response.text, "html.parser")
+    if soup.select_one('#sec-if-cpt-container') is not None and soup.select_one('.scf-akamai-logo, .scf-akamai-logo-sec-abc') is not None:
+        return True
+    heading=soup.title or soup.find('h1')
+    return bool(heading and heading.get_text(' ', strip=True).lower() == 'access denied'
+                and 'errors.edgesuite.net/' in response.text)
+
 def _visible_text_length(html):
     """Approximate visible body text length for challenge heuristics."""
     soup=BeautifulSoup(html, "html.parser")
@@ -2905,6 +2914,9 @@ def _build_flaresolverr_fetch_result(url, value):
     if _detect_cloudflare(response):
         return _build_fetch_result(url, "flaresolverr", response=response,
                                    error="Cloudflare challenge remains after browser rendering.")
+    if _detect_akamai(response):
+        return _build_fetch_result(url, "flaresolverr", response=response,
+                                   error="Akamai challenge or access denial remains after browser rendering.")
     final_url=_normalize_final_url(response, url)
     title, clean_text, chunks=_extract_html_content(response.content, base_url=final_url)
     metadata=_extract_html_metadata(response.content, base_url=final_url)
@@ -3053,7 +3065,7 @@ FETCH_SERVED_FROM={
 }
 EXTENDED_FETCH_FALLBACKS=("llm-context", "archive")
 # Failures that mean "blocked or unreachable", not "the page does not exist".
-FALLBACK_ELIGIBLE_STATUSES={"cf_challenge", "transport_error", "empty", "spa_shell", "error"}
+FALLBACK_ELIGIBLE_STATUSES={"cf_challenge", "akamai_challenge", "transport_error", "empty", "spa_shell", "error"}
 FALLBACK_ELIGIBLE_HTTP_STATUSES={401, 403, 408, 425, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530}
 
 class SiteApiError(RuntimeError):
@@ -3079,6 +3091,8 @@ def _result_status(result):
     if isinstance(status_code, int) and status_code >= 400:
         return "http_error"
     lowered=str(error).lower()
+    if "akamai" in lowered:
+        return "akamai_challenge"
     if "cloudflare" in lowered:
         return "cf_challenge"
     if "spa shell" in lowered:
@@ -3182,6 +3196,16 @@ def _perform_direct_fetch(url, config, attempts):
         if direct_http_error:
             attempts.append(_attempt_entry("direct", "http_error", started, http_status=http_status, detail=direct_http_error))
             return _build_fetch_result(url, "direct", response=response, error=direct_http_error)
+        if not binary_request and _detect_akamai(response):
+            attempts.append(_attempt_entry("direct", "akamai_challenge", started))
+            if canFallback:
+                rendered, flareErr=_flaresolverr_attempt(url, flaresolverrUrl, flaresolverrTimeout, attempts)
+                if rendered is not None:
+                    return rendered
+                return _build_fetch_result(url, "direct", response=response,
+                                           error=f"Akamai challenge detected. Browser failed: {flareErr}")
+            return _build_fetch_result(url, "direct", response=response,
+                                       error="Akamai challenge detected; browser fallback is not configured or disabled.")
         converted_result=_convert_binary_response(url, response)
         if converted_result:
             attempts.append(_attempt_entry("direct", _result_status(converted_result), started, detail=converted_result.get("error")))
@@ -3546,8 +3570,9 @@ _GENERIC_PATH_SEGMENTS={"t", "topic", "topics", "index", "blog", "blogs", "docs"
 _GENERIC_TITLES={"just a moment...", "no title", "attention required! | cloudflare", "access denied", "403 forbidden"}
 
 def _url_match_key(url):
-    parsed=urlparse(url or "")
-    return (_normalize_hostname(parsed.hostname), (parsed.path or "/").rstrip("/") or "/")
+    parsed=urlparse(normalize_fetch_cache_url(url or ""))
+    return (_normalize_hostname(parsed.hostname), parsed.port,
+            (parsed.path or "/").rstrip("/") or "/", parsed.params, parsed.query)
 
 def _slug_terms(path):
     terms=[]
@@ -3566,7 +3591,7 @@ def _llm_context_fetch_fallback(url, config, title_hint=None):
     parsed=urlparse(url)
     host=_normalize_hostname(parsed.hostname)
     terms=title_hint if title_hint and title_hint.strip().lower() not in _GENERIC_TITLES else _slug_terms(parsed.path)
-    query=f"site:{host} {terms}".strip() if terms else url
+    query=f"site:{host} {terms}".strip() if terms and not parsed.query else url
     data=perform_llm_context_search(query, api_key, config)
     target=_url_match_key(url)
     for item in data.get("results", []):
@@ -4631,6 +4656,11 @@ def shape_search_result(result, engine, verbose=False, freshness=None, snippet_l
 def _exact_cache_lookup(query, engine, offset, cache_ttl, use_semantic, variant=None):
     """Attempt exact cache lookup and semantic-index backfill when needed."""
     result = read_from_cache(query, engine, offset, cache_ttl, variant=variant)
+    if result and engine == "fetch":
+        if result.get("fetched_via") == "llm-context" and _url_match_key(result.get("final_url")) != _url_match_key(query):
+            return None
+        if (result.get("title") or "").strip().lower() == "access denied" and "errors.edgesuite.net/" in (result.get("content") or ""):
+            return None
     if result:
         result["_from_cache"] = True
         try:

@@ -549,6 +549,12 @@ The tool automatically detects Cloudflare challenges by checking for:
 
 ### Fetch fallback chain
 
+Akamai interstitials trigger the configured browser fallback. Unresolved Akamai
+challenges and denial pages fail even if the browser proxy reports HTTP 200;
+rendering does not guarantee access. LLM Context URL matching preserves topic
+IDs and page numbers, ignoring only known tracking parameters. Legacy cached
+wrong-page excerpts and Akamai denial pages are bypassed.
+
 Each step runs only when the previous one did not produce content:
 
 1. **Site API** — only for recognized URLs: X/Twitter (fxtwitter), Discourse topics (`/t/{id}.json`, then `/raw/{id}`), Reddit threads (`.json` on `www.reddit.com`, then `old.reddit.com`), and V2EX topics (`/api/topics/show.json` and `/api/replies/show.json`). Blocked JSON APIs are retried through FlareSolverr when it is configured.

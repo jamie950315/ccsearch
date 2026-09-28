@@ -81,6 +81,11 @@ When available, `_simple_fetch` uses `curl_cffi` with Chrome impersonation. Othe
 - structured failures for non-success HTTP responses, unavailable document converters, and browser-rendered pages with no extractable content
 - preservation of FlareSolverr final URL, HTTP status, and content type; ordinary 404 responses and known binary URLs are not hidden by HTML fallback
 
+Known Akamai interstitials trigger browser fallback; unresolved challenges and
+denial pages fail even with HTTP 200. LLM Context matching preserves topic IDs
+and page numbers, ignoring known tracking parameters. Legacy wrong-page and
+Akamai denial cache entries are bypassed. Browser rendering does not guarantee access.
+
 ### Batch Execution
 
 Batch execution lives in the shared core, not the API layer.
