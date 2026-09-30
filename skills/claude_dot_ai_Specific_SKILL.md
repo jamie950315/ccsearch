@@ -61,13 +61,13 @@ curl -s -X POST YOUR_CCSEARCH_BASE_URL/search \
 | `engine` | string | Yes | `brave`, `perplexity`, `both`, `fetch`, `llm-context`, `perplexity-verify` |
 | `claims` | list | No | Up to 10 claims for `perplexity-verify` (instead of `query`) |
 | `result_limit` | int | No | Results for `brave`, `both`, `llm-context` (default `8`) |
-| `freshness` | string | No | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD`; older dated results are removed (`brave`, `both`, `llm-context`) |
+| `freshness` | string | No | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD`; dates must exist and start must not follow end; older dated results are removed (`brave`, `both`, `llm-context`) |
 | `country` / `search_lang` | string | No | Brave region and language, e.g. `TW` / `zh-hant` |
 | `snippet_limit` | int | No | Snippets per `llm-context` result (default `5`) |
 | `format` | string | No | Fetch: `text` (default, `content` only) or `chunks` (`chunks` only) |
 | `focus` / `focus_k` | string / int | No | Fetch: return only the `focus_k` (default `5`) passages most relevant to `focus` |
 | `max_chars` | int | No | Fetch: truncate `content`; adds `truncated: true` and `total_chars` |
-| `max_replies` | int | No | Fetch: forum replies for Discourse/Reddit/V2EX (default `30`) |
+| `max_replies` | int | No | Fetch: forum replies for Discourse/Reddit/V2EX (default `30`); `0` returns no replies and skips optional reply requests |
 | `verbose` | bool | No | Add hashes, offsets, section paths, outbound links, transport headers, raw ages |
 | `offset` | int | No | Pagination offset (`brave` and `both` only) |
 | `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, `llm-context` |
@@ -335,6 +335,8 @@ Items whose text contained AI-directed instructions carry `injection_suspected: 
 Use documented JSON types: booleans are true/false, integer options are integers, and semantic thresholds are finite numbers in [0, 1]. Invalid batch items are isolated from valid items. Failed/partial responses are not cached. The combined engine preserves a successful side with an explicit side error; total failure includes a top-level error. HTTP total combined failures return 500.
 
 Explicit FlareSolverr mode requires a configured browser URL. Unresolved challenge pages and empty converted documents are failures, not successful content. Programming errors are surfaced rather than retried through another fetch method. Fetch-only options (`format`, `focus`, `focus_k`, `max_chars`, `max_replies`) sent to a search engine, or search options sent to `fetch`, return 400.
+
+Verbose content hashes and chunk offsets describe the returned text after scrubbing, focus, and truncation. For chunks, `content_sha256` hashes their texts joined with a single newline; transport metadata still describes the original response. Automatic cache cleanup scans are shared across local processes and run at most hourly on systems with file locking; explicit `--prune-cache` always scans.
 
 Non-200 responses use `{"error":"category","message":"details"}`. Common cases:
 

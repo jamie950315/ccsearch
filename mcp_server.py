@@ -130,7 +130,7 @@ def search(
         engine: brave | llm-context | both | perplexity
         offset: Pagination offset (brave/both)
         result_limit: Results to return for brave/both/llm-context (default 8)
-        freshness: pd (day), pw (week), pm (month), py (year), or YYYY-MM-DDtoYYYY-MM-DD; older dated results are removed
+        freshness: pd (day), pw (week), pm (month), py (year), or YYYY-MM-DDtoYYYY-MM-DD; valid dates with start <= end; older dated results are removed
         country: Two-letter country code such as US, TW, JP (brave/both/llm-context)
         search_lang: Language code such as en, ja, zh-hant (brave/both/llm-context)
         snippet_limit: Snippets per llm-context result (default 5)
@@ -186,7 +186,7 @@ def fetch(
         focus: Return only the passages most relevant to this topic
         focus_k: Number of focus passages (default 5)
         max_chars: Truncate content; the result then has truncated=true and total_chars
-        max_replies: Forum replies to include (default 30)
+        max_replies: Forum replies to include (default 30); 0 returns none and skips optional reply requests
         verbose: Include hashes, character offsets, section paths, and outbound links
         flaresolverr: Skip direct fetch and render with FlareSolverr immediately
         cache: Enable server-side result caching (default off)

@@ -42,6 +42,8 @@ Use and update shared helpers in `ccsearch.py` instead of re-implementing behavi
 
 Cache freshness defaults to 90 days and cannot exceed 90 days. A shorter caller-provided `cache_ttl` still expires a result earlier. Result files become unreadable after 90 days and are physically deleted beginning on day 91; `--prune-cache` and `ccsearch-cache-prune.timer` enforce cleanup, including semantic-index orphan removal.
 
+Automatic cleanup shares an hourly completion timestamp across local processes in the existing cache operations lock file; explicit pruning bypasses that schedule. HTML response extraction reads metadata before pruning and reuses one parsed DOM. Default text shaping does not scrub unused chunks. Rebuild section metadata after removing injected headings, and keep hashes and offsets consistent with the returned text.
+
 ### Search Engines
 
 - `brave`, the Brave side of `both`, and `llm-context` prefer `BRAVE_SEARCH_API_KEY`, round-robin however many extra Search keys are configured, and fall back to `BRAVE_API_KEY` only when no Search key is set

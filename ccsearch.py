@@ -187,6 +187,7 @@ _brave_rate_limit_thread_lock = threading.Lock()
 _brave_key_rotation_thread_lock = threading.Lock()
 _BRAVE_NUMBERED_KEY_RE = re.compile(r"^BRAVE_SEARCH_API_KEY_([1-9]\d*)$")
 _last_cache_cleanup_at=0.0
+_last_cache_cleanup_dir=None
 
 ENGINE_DETAILS={
     "brave": {
@@ -399,35 +400,54 @@ def _prune_semantic_index_orphans():
 def prune_cache(now=None, force=False):
     """Delete result files beginning on day 91 and prune semantic-index orphans.
 
-    Normal calls scan at most once per hour per process. ``force=True`` is used
-    by the maintenance CLI/timer and tests.
+    Normal calls scan at most once per hour across processes sharing a cache.
+    ``force=True`` is used by the maintenance CLI/timer and tests.
     """
-    global _last_cache_cleanup_at
+    global _last_cache_cleanup_at, _last_cache_cleanup_dir
     current_time=time.time() if now is None else now
-    with _cache_cleanup_lock:
-        if not force and current_time - _last_cache_cleanup_at < CACHE_CLEANUP_INTERVAL_SECONDS:
-            return {"deleted_files": 0, "pruned_index_entries": 0, "errors": 0, "skipped": True}
-        _last_cache_cleanup_at=current_time
-
     cache_dir=get_cache_dir()
-    deleted=0
-    errors=0
-    with _cache_lock:
+    skipped={"deleted_files": 0, "pruned_index_entries": 0, "errors": 0, "skipped": True}
+    with _cache_cleanup_lock:
+        if (not force and _last_cache_cleanup_dir == cache_dir
+                and 0 <= current_time - _last_cache_cleanup_at < CACHE_CLEANUP_INTERVAL_SECONDS):
+            return skipped
+        deleted=0
+        errors=0
+        pruned=0
         try:
-            with _locked_runtime_file(_cache_operations_lock_path()):
-                for entry in os.scandir(cache_dir):
-                    if not entry.is_file(follow_symlinks=False) or not _cache_result_filename(entry.name):
-                        continue
-                    try:
-                        if _cache_file_age(entry.path, current_time) >= CACHE_DELETE_AGE_SECONDS:
-                            os.unlink(entry.path)
-                            deleted+=1
-                    except OSError:
-                        errors+=1
+            with _cache_lock, _locked_runtime_file(_cache_operations_lock_path()) as state_file:
+                try:
+                    state=json.load(state_file)
+                except json.JSONDecodeError:
+                    state={}
+                completed_at=state.get("last_cleanup_at") if isinstance(state, dict) else None
+                if (not force and type(completed_at) in (int, float)
+                        and 0 <= current_time - completed_at < CACHE_CLEANUP_INTERVAL_SECONDS):
+                    _last_cache_cleanup_at=completed_at
+                    _last_cache_cleanup_dir=cache_dir
+                    return skipped
+                with os.scandir(cache_dir) as entries:
+                    for entry in entries:
+                        if not entry.is_file(follow_symlinks=False) or not _cache_result_filename(entry.name):
+                            continue
+                        try:
+                            if _cache_file_age(entry.path, current_time) >= CACHE_DELETE_AGE_SECONDS:
+                                os.unlink(entry.path)
+                                deleted+=1
+                        except OSError:
+                            errors+=1
+                pruned=_prune_semantic_index_orphans()
+                if not errors:
+                    # Publish only completed cleanup, while holding the same lock
+                    # used by other CLI/API/MCP processes to decide whether to scan.
+                    state_file.seek(0)
+                    state_file.truncate()
+                    json.dump({"last_cleanup_at": current_time}, state_file)
+                    state_file.flush()
+                    _last_cache_cleanup_at=current_time
+                    _last_cache_cleanup_dir=cache_dir
         except OSError:
             errors+=1
-
-    pruned=_prune_semantic_index_orphans()
     return {"deleted_files": deleted, "pruned_index_entries": pruned, "errors": errors, "skipped": False}
 
 def read_from_cache(query, engine, offset, ttl_minutes, variant=None):
@@ -1472,10 +1492,16 @@ def _resolve_verify_sources(raw_sources, citations):
     dropped=0
     for source in raw_sources if isinstance(raw_sources, list) else [raw_sources]:
         url=None
+        number=None
         if isinstance(source, bool):
             source=None
-        if isinstance(source, (int, float)) or (isinstance(source, str) and re.fullmatch(r"\[?\d+\]?", source.strip())):
-            number=int(str(source).strip("[] "))
+        if type(source) is int:
+            number=source
+        elif type(source) is float and math.isfinite(source) and source.is_integer():
+            number=int(source)
+        elif isinstance(source, str) and re.fullmatch(r"\[?\d+\]?", source.strip()):
+            number=int(source.strip("[] "))
+        if number is not None:
             if 1 <= number <= len(citation_urls):
                 url=citation_urls[number - 1]
         elif isinstance(source, str) and source.strip():
@@ -1875,13 +1901,9 @@ def _clean_html(html):
 
 def _extract_html_content(html, base_url=None):
     """Parse HTML and return (title, content, chunks) with basic structure preserved."""
-    soup=BeautifulSoup(html, 'html.parser')
+    soup=html if isinstance(html, Tag) else BeautifulSoup(html, 'html.parser')
     title=_extract_html_title(soup)
-
-    if soup.body:
-        root=BeautifulSoup(str(soup.body), 'html.parser')
-    else:
-        root=BeautifulSoup(str(soup), 'html.parser')
+    root=soup.body or soup
 
     _prune_html_noise(root)
     root=_select_content_root(root)
@@ -2302,13 +2324,14 @@ def _serialize_list(node, depth=0):
     ordered=(node.name or "").lower() == "ol"
     for idx, item in enumerate(node.find_all("li", recursive=False), 1):
         nested_lists=item.find_all(["ul", "ol"], recursive=False)
-        item_clone=BeautifulSoup(str(item), "html.parser").find("li")
-        if item_clone:
-            for nested in item_clone.find_all(["ul", "ol"], recursive=False):
-                nested.extract()
-            item_text=_normalize_block_text(item_clone.get_text(" ", strip=True))
-        else:
-            item_text=""
+        pieces=[]
+        for child in item.children:
+            if isinstance(child, Tag):
+                if child.name not in {"ul", "ol"}:
+                    pieces.append(child.get_text(" ", strip=True))
+            elif type(child) is NavigableString:
+                pieces.append(str(child).strip())
+        item_text=_normalize_block_text(" ".join(piece for piece in pieces if piece))
         prefix=f"{idx}. " if ordered else "- "
         if item_text:
             lines.append(("  " * depth) + prefix + item_text)
@@ -2360,14 +2383,15 @@ def _annotate_chunks(chunks):
         text=annotated_chunk.get("text", "")
         if annotated_chunk.get("type") == "heading":
             heading_level=max(1, int(annotated_chunk.get("heading_level", 1)))
-            section_stack=section_stack[:heading_level - 1]
+            while section_stack and section_stack[-1][0] >= heading_level:
+                section_stack.pop()
             if text:
-                section_stack.append(text)
+                section_stack.append((heading_level, text))
             current_section=text or current_section
 
         annotated_chunk["section_title"]=current_section
-        annotated_chunk["section_path"]=list(section_stack)
-        annotated_chunk["section_path_text"]=" > ".join(section_stack) if section_stack else None
+        annotated_chunk["section_path"]=[title for _, title in section_stack]
+        annotated_chunk["section_path_text"]=" > ".join(annotated_chunk["section_path"]) if section_stack else None
         annotated_chunk["section_depth"]=len(section_stack)
         annotated_chunk["char_count"]=len(text)
         annotated_chunk["word_count"]=len(re.findall(r"\S+", text))
@@ -2432,7 +2456,7 @@ def _extract_html_title(soup):
 
 def _extract_html_metadata(html, base_url=None):
     """Extract stable page metadata that is useful for downstream agents."""
-    soup=BeautifulSoup(html, 'html.parser')
+    soup=html if isinstance(html, Tag) else BeautifulSoup(html, 'html.parser')
     metadata={}
 
     html_tag=soup.find("html")
@@ -2818,12 +2842,16 @@ def _detect_cloudflare(response):
 
 def _detect_akamai(response):
     """Recognize observed Akamai interstitials, not ordinary CDN scripts."""
-    soup=BeautifulSoup(response.text, "html.parser")
+    text=response.text
+    # Ordinary responses do not need a DOM just to rule out these interstitials.
+    if 'sec-if-cpt-container' not in text and 'errors.edgesuite.net/' not in text:
+        return False
+    soup=BeautifulSoup(text, "html.parser")
     if soup.select_one('#sec-if-cpt-container') is not None and soup.select_one('.scf-akamai-logo, .scf-akamai-logo-sec-abc') is not None:
         return True
     heading=soup.title or soup.find('h1')
     return bool(heading and heading.get_text(' ', strip=True).lower() == 'access denied'
-                and 'errors.edgesuite.net/' in response.text)
+                and 'errors.edgesuite.net/' in text)
 
 def _visible_text_length(html):
     """Approximate visible body text length for challenge heuristics."""
@@ -2917,9 +2945,7 @@ def _build_flaresolverr_fetch_result(url, value):
     if _detect_akamai(response):
         return _build_fetch_result(url, "flaresolverr", response=response,
                                    error="Akamai challenge or access denial remains after browser rendering.")
-    final_url=_normalize_final_url(response, url)
-    title, clean_text, chunks=_extract_html_content(response.content, base_url=final_url)
-    metadata=_extract_html_metadata(response.content, base_url=final_url)
+    title, clean_text, chunks, metadata, _=_extract_response_content(url, response)
     empty_error=None
     if not clean_text.strip():
         empty_error="No extractable content returned after browser rendering; use an interactive browser."
@@ -3263,8 +3289,10 @@ def _extract_response_content(url, response):
     if _is_text_content_type(contentType) and not looksLikeHtml:
         title, cleanText=_decode_text_response(response, final_url)
         return title, cleanText, _chunk_text_content(cleanText), {}, looksLikeHtml
-    title, cleanText, chunks=_extract_html_content(response.content, base_url=final_url)
-    metadata=_extract_html_metadata(response.content, base_url=final_url)
+    soup=BeautifulSoup(response.content, 'html.parser')
+    # Read metadata before content extraction removes scripts and other noise.
+    metadata=_extract_html_metadata(soup, base_url=final_url)
+    title, cleanText, chunks=_extract_html_content(soup, base_url=final_url)
     return title, cleanText, chunks, metadata, looksLikeHtml
 
 def _extract_fetch_response(url, response, fetched_via):
@@ -3384,6 +3412,8 @@ def _site_api_result(url, fetched_via, title, content, replies, reply_count, for
 def _discourse_replies_from_posts(posts, base_url, max_replies):
     replies=[]
     for post in posts:
+        if len(replies) >= max_replies:
+            break
         if not isinstance(post, dict) or post.get("post_number") == 1:
             continue
         reply={
@@ -3395,8 +3425,6 @@ def _discourse_replies_from_posts(posts, base_url, max_replies):
         if post.get("reply_to_post_number"):
             reply["reply_to"]=post["reply_to_post_number"]
         replies.append(reply)
-        if len(replies) >= max_replies:
-            break
     return replies
 
 def _parse_discourse_raw(text):
@@ -3522,11 +3550,12 @@ def _fetch_v2ex(url, config, max_replies, topic_id):
         raise SiteApiError("V2EX topic not found.", status="http_error", http_status=404)
     replies=[]
     replies_error=None
-    try:
-        raw_replies=_fetch_site_json(f"https://www.v2ex.com/api/replies/show.json?topic_id={topic_id}", config)
-    except SiteApiError as exc:
-        raw_replies=[]
-        replies_error=str(exc)
+    raw_replies=[]
+    if max_replies and topic.get("replies") != 0:
+        try:
+            raw_replies=_fetch_site_json(f"https://www.v2ex.com/api/replies/show.json?topic_id={topic_id}", config)
+        except SiteApiError as exc:
+            replies_error=str(exc)
     for reply in raw_replies if isinstance(raw_replies, list) else []:
         if not isinstance(reply, dict):
             continue
@@ -3852,26 +3881,29 @@ def _openrouter_quota(timeout=5):
     api_key=_normalize_secret_token(os.environ.get("OPENROUTER_API_KEY", ""))
     if not api_key:
         return {"configured": False}
+    fingerprint=hashlib.sha256(api_key.encode("utf-8")).hexdigest()
     with _openrouter_quota_lock:
-        if _openrouter_quota_cache["value"] is not None and time.time() - _openrouter_quota_cache["at"] < 60:
+        if (_openrouter_quota_cache["value"] is not None
+                and _openrouter_quota_cache.get("fingerprint") == fingerprint
+                and 0 <= time.time() - _openrouter_quota_cache["at"] < 60):
             return _openrouter_quota_cache["value"]
-    try:
-        response=requests.get("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout)
-        response.raise_for_status()
-        data=(response.json() or {}).get("data") or {}
-        value={
-            "configured": True,
-            "limit": data.get("limit"),
-            "usage": data.get("usage"),
-            "limit_remaining": data.get("limit_remaining"),
-            "is_free_tier": data.get("is_free_tier"),
-            "rate_limit": data.get("rate_limit"),
-            "observed_at": _utc_now_iso(),
-        }
-    except (requests.exceptions.RequestException, ValueError, AttributeError) as exc:
-        value={"configured": True, "error": f"Quota lookup failed: {type(exc).__name__}"}
-    with _openrouter_quota_lock:
-        _openrouter_quota_cache.update({"at": time.time(), "value": value})
+        # Serialize a refresh so simultaneous diagnostics share one network call.
+        try:
+            response=requests.get("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout)
+            response.raise_for_status()
+            data=(response.json() or {}).get("data") or {}
+            value={
+                "configured": True,
+                "limit": data.get("limit"),
+                "usage": data.get("usage"),
+                "limit_remaining": data.get("limit_remaining"),
+                "is_free_tier": data.get("is_free_tier"),
+                "rate_limit": data.get("rate_limit"),
+                "observed_at": _utc_now_iso(),
+            }
+        except (requests.exceptions.RequestException, ValueError, AttributeError) as exc:
+            value={"configured": True, "error": f"Quota lookup failed: {type(exc).__name__}"}
+        _openrouter_quota_cache.update({"at": time.time(), "value": value, "fingerprint": fingerprint})
     return value
 
 def _brave_quota_report():
@@ -4070,6 +4102,13 @@ def validate_execution_options(engine, offset=None, cache_ttl=DEFAULT_CACHE_TTL_
         return "The 'freshness', 'country', and 'search_lang' options are only supported for brave, both, and llm-context engines."
     if freshness and freshness not in FRESHNESS_WINDOWS_DAYS and not _FRESHNESS_RANGE_RE.match(freshness):
         return "'freshness' must be pd, pw, pm, py, or a YYYY-MM-DDtoYYYY-MM-DD range."
+    if freshness and _FRESHNESS_RANGE_RE.match(freshness):
+        try:
+            earliest, latest=_freshness_bounds(freshness)
+        except ValueError:
+            return "'freshness' must contain valid calendar dates."
+        if earliest > latest:
+            return "'freshness' start date must not be later than its end date."
     if country and not _COUNTRY_RE.match(country):
         return "'country' must be a two-letter country code (for example US, TW, JP) or ALL."
     if search_lang and not _SEARCH_LANG_RE.match(search_lang):
@@ -4498,8 +4537,11 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
                 shaped[field]=cleaned or ""
                 findings.extend(found)
     content=shaped.get("content")
-    chunks=[dict(chunk) for chunk in shaped.get("chunks") or [] if isinstance(chunk, dict)]
+    original_content=content
+    needs_chunks=format == "chunks" or bool(focus)
+    chunks=[dict(chunk) for chunk in shaped.get("chunks") or [] if isinstance(chunk, dict)] if needs_chunks else []
     chunk_findings=[]
+    chunks_changed=False
     if isinstance(content, str):
         cleaned, found=scrub_injection(content, field="content")
         if found:
@@ -4509,12 +4551,17 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
     for chunk in chunks:
         cleaned, found=scrub_injection(chunk.get("text"), field=f"chunks[{chunk.get('index')}]")
         if found:
+            chunks_changed=True
             chunk_findings.extend(found)
             if not cleaned:
                 continue
             chunk["text"]=cleaned
         kept_chunks.append(chunk)
     chunks=kept_chunks
+    if chunks_changed:
+        # Removed headings must not survive in section metadata and be inserted
+        # back into focused output. Refresh hashes and offsets for changed text.
+        chunks=_annotate_chunks([dict(chunk, index=idx) for idx, chunk in enumerate(chunks, 1)])
     if isinstance(shaped.get("replies"), list):
         replies=[]
         for idx, reply in enumerate(shaped["replies"]):
@@ -4551,6 +4598,7 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
             {"index": idx, "type": "excerpt", "text": passage["text"], "section_title": passage.get("section")}
             for idx, passage in enumerate(selected, 1)
         ]
+        chunks_changed=True
 
     total_chars=len(content) if isinstance(content, str) else None
     truncated=False
@@ -4566,6 +4614,7 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
                 if budget > 0 and not limited:
                     limited.append(dict(chunk, text=_truncate_text(text, budget)))
                 truncated=True
+                chunks_changed=True
                 break
             limited.append(chunk)
             budget-=len(text) + 1
@@ -4575,6 +4624,12 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
         shaped["total_chars"]=total_chars
 
     if format == "chunks":
+        if chunks_changed and verbose:
+            sections=[chunk.get("section_title") for chunk in chunks]
+            chunks=_annotate_chunks([dict(chunk, index=idx) for idx, chunk in enumerate(chunks, 1)])
+            if focus:
+                for chunk, section in zip(chunks, sections):
+                    chunk["section_title"]=section
         shaped.pop("content", None)
         shaped["chunks"]=[_compact_chunk(chunk, verbose) for chunk in chunks]
         shaped["chunk_count"]=len(shaped["chunks"])
@@ -4582,9 +4637,15 @@ def shape_fetch_result(result, format="text", verbose=False, focus=None, focus_k
     else:
         if isinstance(content, str):
             shaped["content"]=content
-            shaped["content_word_count"]=len(re.findall(r"\S+", content))
         shaped.pop("chunks", None)
         shaped.pop("chunk_count", None)
+        if focus:
+            findings.extend(chunk_findings)
+    if verbose:
+        output_content="\n".join(chunk.get("text") or "" for chunk in chunks) if format == "chunks" else content
+        if isinstance(output_content, str) and (output_content != original_content or chunks_changed):
+            shaped["content_sha256"]=hashlib.sha256(output_content.encode("utf-8")).hexdigest()
+            shaped["content_word_count"]=len(re.findall(r"\S+", output_content))
     if not verbose:
         for field in FETCH_VERBOSE_FIELDS:
             shaped.pop(field, None)

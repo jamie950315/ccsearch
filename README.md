@@ -137,6 +137,8 @@ ccsearch "React 19 release date" -e perplexity --cache --cache-ttl 60
 ```
 *Cache files are stored in `~/.cache/ccsearch/` as JSON files keyed by MD5 hash of `(query, engine, offset)` plus any request options that change upstream results (`freshness`, `country`, `search_lang`, and a non-default `max_replies`).* Cache hits return `cached_at` (UTC ISO 8601) with `cache_status`; `--max-cache-age` (`max_cache_age` in the API/MCP, in minutes) ignores entries older than that age and fetches fresh data. The default and maximum readable age is 90 days (`129600` minutes). A smaller `--cache-ttl` shortens the freshness window. Beginning on day 91, result files are deleted by the hourly maintenance timer or the next cache cleanup pass. Run `ccsearch --prune-cache --format json` to enforce retention immediately.
 
+Automatic cleanup scans run at most once per hour across CLI, API, and MCP processes sharing the same cache directory on systems with file locking. Explicit `--prune-cache` always runs a scan.
+
 For the `fetch` engine, URLs are normalized before hashing so cache hits survive:
 
 - tracking parameters such as `utm_*`, `fbclid`, `gclid`, etc.
@@ -236,7 +238,7 @@ Main search endpoint. Accepts a JSON body with the following fields:
 | `semantic_threshold` | float | No | Cosine similarity threshold (default: `0.9`) |
 | `offset` | int | No | Pagination offset (`brave` and `both` only) |
 | `result_limit` | int | No | Results returned for `brave`, `both`, and `llm-context` (default: `8`) |
-| `freshness` | string | No | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` for `brave`, `both`, `llm-context` |
+| `freshness` | string | No | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` for `brave`, `both`, `llm-context`; dates must exist and the start must not follow the end |
 | `country` | string | No | Two-letter country code (for example `US`, `TW`) or `ALL` |
 | `search_lang` | string | No | Search language code (for example `en`, `ja`, `zh-hant`) |
 | `snippet_limit` | int | No | Snippets per `llm-context` result (default: `5`) |
@@ -245,7 +247,7 @@ Main search endpoint. Accepts a JSON body with the following fields:
 | `focus` | string | No | Fetch only the passages most relevant to this topic |
 | `focus_k` | int | No | Number of focus passages (default: `5`) |
 | `max_chars` | int | No | Truncate fetched content; adds `truncated: true` and `total_chars` |
-| `max_replies` | int | No | Forum replies for Discourse/Reddit/V2EX threads (default: `30`) |
+| `max_replies` | int | No | Forum replies for Discourse/Reddit/V2EX threads (default: `30`); `0` returns no replies and skips optional reply requests |
 | `verbose` | bool | No | Include hashes, offsets, section paths, outbound links, transport headers, and raw ages |
 | `include_hosts` | list/string | No | Host allow-list for `brave`, `both`, and `llm-context` |
 | `exclude_hosts` | list/string | No | Host deny-list for `brave`, `both`, and `llm-context` |
@@ -279,6 +281,8 @@ For `fetch` responses, the default JSON payload is compact:
 - `injection_suspected` when AI-directed text was removed
 
 With `verbose: true`, fetch results also include `content_sha256`, `content_word_count`, `content_length`, `etag`, `last_modified`, `filename`, `hostname`, `fetched_via`, `outbound_links` with their counts and hosts, and full chunk metadata (`chunk_id`, `char_start`, `char_end`, `relative_position`, `section_path`, `text_sha256`, link counts, and list/table/code counts). Compact chunks keep `index`, `type`, `text`, `section_title`, and small structural hints such as `heading_level`, `code_language`, `list_ordered`, and `table_headers`.
+
+Content hashes and chunk offsets describe the returned text after scrubbing, focus, and truncation. For chunk output, `content_sha256` hashes chunk texts joined with a single newline. Transport fields such as `content_length` and `etag` describe the original response.
 
 HTML extraction removes documentation chrome before choosing the main text: a single `<main>`/`role="main"` or `<article>` landmark wins over longer navigation sidebars, and side navigation, tables of contents, breadcrumbs, pagers, author boxes, and call-to-action blocks marked by whole class/id tokens are pruned. Repeated responsive-layout headings are merged and "Previous/Next post" links are dropped.
 
