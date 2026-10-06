@@ -88,6 +88,10 @@ denial pages fail even with HTTP 200. LLM Context matching preserves topic IDs
 and page numbers, ignoring known tracking parameters. Legacy wrong-page and
 Akamai denial cache entries are bypassed. Browser rendering does not guarantee access.
 
+Navigation pruning preserves sidebar-named layout wrappers containing substantial
+article/main paragraph text. Linked teaser cards remain removable navigation;
+an article's linked tags must not cause its enclosing layout to lose the body.
+
 ### Batch Execution
 
 Batch execution lives in the shared core, not the API layer.

@@ -13,6 +13,39 @@ from test_agent_improvements import http_response, make_config
 
 
 class ExtractionEfficiencyTests(unittest.TestCase):
+    def test_sidebar_layout_wrapper_preserves_complete_editorial_landmark(self):
+        paragraphs=[f'Editorial paragraph {n} with useful product specifications and context.' for n in range(5)]
+        page=(
+            '<html><head><title>Product report</title></head><body><main>'
+            '<div class="site-container single-layout site-sidebar-right">'
+            '<article><h1>Product report</h1>'
+            + ''.join(f'<p>{text}</p>' for text in paragraphs)
+            + '<div class="tags"><a href="/tag">' + 'Product classification. ' * 30
+            + '</a></div></article><div class="sidebar-right"><a href="/other">Other news</a></div>'
+            '</div></main></body></html>'
+        )
+        with patch('ccsearch._simple_fetch', return_value=http_response(page)):
+            result=ccsearch.perform_fetch('https://example.com/product', make_config())
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['served_from'], 'direct')
+        for paragraph in paragraphs:
+            self.assertIn(paragraph, result['content'])
+        self.assertNotIn('Other news', result['content'])
+
+    def test_sidebar_article_link_cards_remain_navigation_chrome(self):
+        page=(
+            '<html><head><title>Product report</title></head><body>'
+            '<article><h1>Product report</h1><p>' + 'Useful product specifications. ' * 12
+            + '</p></article><div class="sidebar-right"><article><a href="/other">'
+            + 'Unrelated story description. ' * 12
+            + '</a></article></div></body></html>'
+        )
+        with patch('ccsearch._simple_fetch', return_value=http_response(page)):
+            result=ccsearch.perform_fetch('https://example.com/product', make_config())
+        self.assertTrue(result['ok'])
+        self.assertIn('Useful product specifications.', result['content'])
+        self.assertNotIn('Unrelated story description.', result['content'])
+
     def test_ordinary_list_page_is_parsed_once_with_metadata_preserved(self):
         page = (
             '<html lang="en"><head><title>Guide</title></head><body>'

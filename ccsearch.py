@@ -1964,6 +1964,16 @@ def _is_navigation_chrome(tag):
         return False
     if not _has_navigation_hint(tag):
         return False
+    # A layout wrapper may mention its sidebar while enclosing the article.
+    # Keep substantial prose landmarks; linked teaser cards remain chrome.
+    for landmark in tag.find_all(["main", "article"]):
+        prose_len=sum(
+            len(paragraph.get_text(" ", strip=True))
+            for paragraph in landmark.find_all("p")
+            if _link_density(paragraph) < 0.5
+        )
+        if prose_len >= 200:
+            return False
     text_len=len(tag.get_text(" ", strip=True))
     # Small chrome goes unconditionally; large blocks must look like link lists.
     return text_len <= 1200 or _link_density(tag, text_len) >= 0.5
